@@ -1,0 +1,33 @@
+# Réglages des gestes AirDesk.
+# Toutes les distances sont normalisées par la taille de la main
+# (distance poignet -> base du majeur), donc indépendantes de la distance à la caméra.
+
+engagement:
+  # Temps pendant lequel la main ouverte doit rester visible avant d'activer le contrôle.
+  hold_ms: 300
+  # Si la main disparaît plus longtemps que ça, retour en veille.
+  lost_timeout_ms: 1000
+
+pinch:
+  # Hystérésis : on entre en pincement sous "enter", on en sort au-dessus de "exit".
+  # "exit" > "enter" évite les relâchements involontaires pendant un glisser.
+  enter: 0.25
+  exit: 0.40
+  # Un pincement plus court que ça = clic. Plus long = saisie (glisser).
+  click_max_ms: 300
+
+pointer:
+  # Gain contrôle/affichage (pointage relatif, comme un pavé tactile) :
+  # nombre de pixels parcourus par le curseur quand la main traverse toute la largeur de l'image.
+  pixels_per_frame_width: 2400
+  # Point de la main qui pilote le curseur (index MediaPipe). 9 = base du majeur, stable pendant le pincement.
+  landmark: 9
+
+filter:
+  # Filtre 1€ (Casiez et al., CHI 2012). min_cutoff bas = curseur stable à basse vitesse,
+  # beta haut = moins de retard quand la main bouge vite.
+  # Les positions sont normalisées (0 à 1), d'où un beta plus grand que dans
+  # l'article, qui travaille en pixels (environ 0,007 x 1280 px de large ≈ 9).
+  min_cutoff: 1.0
+  beta: 8.0
+  d_cutoff: 1.0

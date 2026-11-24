@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Outils
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Modèles téléchargés et données locales (jamais de vidéo dans le dépôt)
+models/
+data/raw/
+data/logs/
+*.mp4
+*.avi
+
+# Réglages propres à chaque machine (voir config/local.example.yaml)
+config/local.yaml
+
+# Éditeurs et systèmes
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
