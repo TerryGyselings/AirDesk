@@ -46,6 +46,10 @@ class RuleThresholds:
     folded_below: float = 0.8
     min_index_extension_3d: float = 1.0
     folded_below_3d: float = 0.8
+    # Condition supplémentaire, quelle que soit la règle : paume tournée vers la caméra.
+    # Une main au repos de profil (pouce contre l'index) ressemble sinon à un pincement.
+    require_palm_facing: bool = False
+    min_palm_width: float = 0.0
 
 
 def pinch_candidate(
@@ -54,12 +58,15 @@ def pinch_candidate(
     extensions: tuple[float, ...],
     extensions_3d: tuple[float, ...],
     thresholds: RuleThresholds,
+    palm_width: float | None = None,
 ) -> bool:
     """Vrai si la règle `rule` considère que la main entre en pincement.
 
     `pinch_value` : la mesure de pincement choisie (pinch_ratio par défaut, voir MEASURES),
     comparée à `thresholds.enter`.
     `extensions` et `extensions_3d` : index, majeur, annulaire, auriculaire.
+    `palm_width` : largeur apparente de la paume ; si `require_palm_facing`, elle doit
+    atteindre `min_palm_width`. Une valeur inconnue (None) ne bloque pas.
     """
     if rule not in RULE_CONDITIONS:
         raise ValueError(f"Règle inconnue : '{rule}'. Choix possibles : {', '.join(RULES)}.")
@@ -67,6 +74,10 @@ def pinch_candidate(
 
     if not pinch_value < thresholds.enter:
         return False
+
+    if thresholds.require_palm_facing and palm_width is not None:
+        if palm_width < thresholds.min_palm_width:
+            return False
 
     if use_3d:
         values = extensions_3d
@@ -172,10 +183,11 @@ class PinchHysteresis:
         pinch_value: float,
         extensions: tuple[float, ...],
         extensions_3d: tuple[float, ...],
+        palm_width: float | None = None,
     ) -> str | None:
         if not self.pinched:
             if pinch_candidate(self.rule, pinch_value, extensions, extensions_3d,
-                               self.thresholds):
+                               self.thresholds, palm_width):
                 self.pinched = True
                 self.release_ms = None
                 return "start"

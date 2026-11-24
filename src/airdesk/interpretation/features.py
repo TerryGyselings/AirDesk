@@ -60,6 +60,10 @@ class HandFeatures:
     # seul bout de l'index), elle reste petite quand le pouce touche l'index un peu sous le bout.
     pinch_seg: float
     pinch_seg_68: float
+    # Orientation de la paume. Le geste voulu (« OK ») montre la paume à la caméra ; une main
+    # au repos est souvent de profil, et la paume paraît alors étroite.
+    palm_width: float  # distance base index (5) -> base auriculaire (17) / taille de main
+    palm_facing: float  # |composante z| de la normale à la paume : 1 = de face, 0 = de profil
 
 
 def distance_2d(a: Point, b: Point) -> float:
@@ -156,6 +160,64 @@ def pinch_segment(homogeneous: list[Point], start: int, end: int = INDEX_TIP) ->
     return distance / hand_size
 
 
+INDEX_MCP = 5
+PINKY_MCP = 17
+
+
+def palm_width(homogeneous: list[Point]) -> float:
+    """Largeur apparente de la paume : distance 2D base index -> base auriculaire / taille.
+
+    De face ≈ 0,8 (main synthétique des tests) ; elle diminue comme le cosinus de l'angle
+    quand la main tourne vers le profil.
+    """
+    hand_size = distance_2d(homogeneous[WRIST], homogeneous[MIDDLE_MCP])
+    if hand_size < 1e-6:
+        hand_size = 1e-6
+    return distance_2d(homogeneous[INDEX_MCP], homogeneous[PINKY_MCP]) / hand_size
+
+
+def palm_facing(homogeneous: list[Point]) -> float:
+    """Part de la normale à la paume dirigée vers la caméra (0 à 1).
+
+    Normale = produit vectoriel (P5 - P0) × (P17 - P0), en 3D homogène (z de MediaPipe).
+    On garde la valeur absolue de sa composante z (divisée par sa longueur) : son signe
+    dépend de la main (droite ou gauche) et de la face montrée (paume ou dos).
+    1 = paume face à la caméra, 0 = main de profil.
+    """
+    wx, wy, wz = homogeneous[WRIST]
+    ax = homogeneous[INDEX_MCP][0] - wx
+    ay = homogeneous[INDEX_MCP][1] - wy
+    az = homogeneous[INDEX_MCP][2] - wz
+    bx = homogeneous[PINKY_MCP][0] - wx
+    by = homogeneous[PINKY_MCP][1] - wy
+    bz = homogeneous[PINKY_MCP][2] - wz
+    nx = ay * bz - az * by
+    ny = az * bx - ax * bz
+    nz = ax * by - ay * bx
+    length = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if length < 1e-12:
+        return 0.0
+    return abs(nz) / length
+
+
+def wrist_speed(
+    landmarks: list[Point], previous_landmarks: list[Point], dt_s: float, aspect: float = 1.0
+) -> float | None:
+    """Vitesse du poignet entre deux images, en tailles de main par seconde.
+
+    Unités homogènes et division par la taille de main : la valeur ne dépend ni du format de
+    l'image ni de la distance à la caméra. None si dt_s n'est pas positif.
+    """
+    if dt_s <= 0:
+        return None
+    now = to_homogeneous(landmarks, aspect)
+    before = to_homogeneous(previous_landmarks, aspect)
+    hand_size = distance_2d(now[WRIST], now[MIDDLE_MCP])
+    if hand_size < 1e-6:
+        return None
+    return distance_2d(now[WRIST], before[WRIST]) / dt_s / hand_size
+
+
 def count_folded(extensions: tuple[float, ...], folded_below: float) -> int:
     """Nombre de doigts dont l'extension est sous le seuil (doigts repliés)."""
     count = 0
@@ -223,4 +285,6 @@ def compute_features(
         folded_fingers_3d=count_folded(extensions_3d, folded_below_3d),
         pinch_seg=pinch_segment(homogeneous, 7),
         pinch_seg_68=pinch_segment(homogeneous, 6),
+        palm_width=palm_width(homogeneous),
+        palm_facing=palm_facing(homogeneous),
     )

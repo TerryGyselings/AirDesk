@@ -45,6 +45,8 @@ HAND_COLUMNS = [
     "folded_fingers_3d",
     "pinch_seg",  # distance pouce -> segment 7-8 de l'index / taille de main
     "pinch_seg_68",  # distance pouce -> segment 6-8 de l'index / taille de main
+    "palm_width",  # largeur apparente de la paume (5 -> 17) / taille de main
+    "palm_facing",  # part de la normale à la paume dirigée vers la caméra (1 = de face)
 ]
 
 COLUMNS = (
@@ -54,8 +56,20 @@ COLUMNS = (
         "state",  # état de la machine : veille, actif, pincement, glisser
         "events",  # événements émis, joints par « + » (ex. « move+click »), vide sinon
         "processing_ms",  # temps de traitement de l'image (détection + interprétation)
+        "wrist_x",  # position du poignet dans l'image (0 à 1, image en miroir)
+        "wrist_y",
+        "wrist_speed",  # vitesse du poignet en tailles de main par seconde
+        "cursor_x",  # position calculée du curseur en pixels écran (pointage absolu)
+        "cursor_y",
     ]
 )
+
+
+def optional(value, decimals: int) -> str:
+    """Nombre formaté, ou chaîne vide si la valeur est inconnue (None)."""
+    if value is None:
+        return ""
+    return f"{value:.{decimals}f}"
 
 
 def git_commit(folder: Path = PROJECT_ROOT) -> dict:
@@ -126,6 +140,8 @@ def hand_columns(features) -> list:
     row.append(features.folded_fingers_3d)
     row.append(f"{features.pinch_seg:.4f}")
     row.append(f"{features.pinch_seg_68:.4f}")
+    row.append(f"{features.palm_width:.4f}")
+    row.append(f"{features.palm_facing:.4f}")
     return row
 
 
@@ -168,14 +184,36 @@ class SessionLog:
         return self
 
     def write_frame(
-        self, timestamp_ms: int, features, state: str, events: list, processing_ms: float
+        self,
+        timestamp_ms: int,
+        features,
+        state: str,
+        events: list,
+        processing_ms: float,
+        wrist: tuple[float, float] | None = None,
+        wrist_speed: float | None = None,
+        cursor: tuple[int, int] | None = None,
     ) -> None:
-        """Une ligne par image. `features` vaut None quand aucune main n'est visible."""
+        """Une ligne par image. `features` vaut None quand aucune main n'est visible.
+
+        `wrist` : position du poignet (0 à 1) ; `cursor` : position calculée du curseur en
+        pixels (pointage absolu). Ces valeurs servent à mesurer le tremblement du curseur
+        quand la main est immobile (scripts/analyse_log.py).
+        """
         row = [timestamp_ms]
         row.extend(hand_columns(features))
         row.append(state)
         row.append(event_names(events))
         row.append(f"{processing_ms:.2f}")
+        if wrist is None:
+            row += ["", ""]
+        else:
+            row += [f"{wrist[0]:.4f}", f"{wrist[1]:.4f}"]
+        row.append(optional(wrist_speed, 3))
+        if cursor is None:
+            row += ["", ""]
+        else:
+            row += [cursor[0], cursor[1]]
         self._writer.writerow(row)
 
     def __exit__(self, *exc) -> None:

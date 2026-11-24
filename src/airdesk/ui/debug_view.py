@@ -1,10 +1,11 @@
-"""Dessine le squelette de la main et l'état du système sur l'image de la webcam."""
+"""Dessine le squelette des mains, la zone d'interaction et l'état du système."""
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
 
+from airdesk.config import ZoneConfig
 from airdesk.interpretation.features import HandFeatures
 from airdesk.interpretation.state_machine import State
 from airdesk.perception.hand_tracker import Hand
@@ -25,27 +26,48 @@ STATE_COLORS = {
     State.PINCHING: (0, 200, 255),
     State.DRAGGING: (255, 120, 0),
 }
+IGNORED_COLOR = (110, 110, 110)  # main visible mais non suivie
+ZONE_COLOR = (255, 255, 0)
+
+
+def draw_hand(image: np.ndarray, hand: Hand, color: tuple[int, int, int]) -> None:
+    h, w = image.shape[:2]
+    pts = []
+    for lm in hand.landmarks:
+        pts.append((int(lm[0] * w), int(lm[1] * h)))
+    for a, b in BONES:
+        cv2.line(image, pts[a], pts[b], color, 2)
+    for p in pts:
+        cv2.circle(image, p, 4, (255, 255, 255), -1)
 
 
 def draw_debug(
     image: np.ndarray,
-    hand: Hand | None,
+    hands: list[Hand],
+    selected: int | None,
     features: HandFeatures | None,
     state: State,
     fps: float,
     processing_ms: float,
+    zone: ZoneConfig | None = None,
 ) -> np.ndarray:
+    """`hands` : toutes les mains détectées ; `selected` : indice de la main suivie.
+
+    `zone` : zone d'interaction du pointage absolu, dessinée pour savoir où placer la main.
+    """
     h, w = image.shape[:2]
     color = STATE_COLORS[state]
 
-    if hand is not None:
-        pts = []
-        for lm in hand.landmarks:
-            pts.append((int(lm[0] * w), int(lm[1] * h)))
-        for a, b in BONES:
-            cv2.line(image, pts[a], pts[b], color, 2)
-        for p in pts:
-            cv2.circle(image, p, 4, (255, 255, 255), -1)
+    if zone is not None:
+        top_left = (int(zone.left * w), int(zone.top * h))
+        bottom_right = (int(zone.right * w), int(zone.bottom * h))
+        cv2.rectangle(image, top_left, bottom_right, ZONE_COLOR, 1)
+
+    for i in range(len(hands)):
+        if i == selected:
+            draw_hand(image, hands[i], color)
+        else:
+            draw_hand(image, hands[i], IGNORED_COLOR)
 
     lines = [
         f"Etat : {state.value}",
@@ -53,10 +75,13 @@ def draw_debug(
     ]
     if features is not None:
         lines.append(
-            f"pincement {features.pinch_ratio:.2f}   doigts tendus {features.extended_fingers}"
+            f"pincement {features.pinch_ratio:.2f}   paume {features.palm_width:.2f}"
+            f"   doigts replies {features.folded_fingers}"
         )
     else:
-        lines.append("aucune main")
+        lines.append("aucune main suivie")
+    if len(hands) > 1:
+        lines.append(f"{len(hands)} mains : la grise est ignoree")
     if state == State.IDLE:
         lines.append("Montre ta main ouverte pour activer")
 

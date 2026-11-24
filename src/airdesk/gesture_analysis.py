@@ -23,16 +23,18 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
-from airdesk.interpretation.features import pinch_segment
+from airdesk.interpretation.features import palm_facing, palm_width, pinch_segment
 from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_candidate
 from airdesk.interpretation.quality import HandSizeGuard
 from airdesk.log_analysis import percentile
 
 POSITIVE_LABEL = "pincement_maintenu"
-NEGATIVE_LABELS = ["main_ouverte", "poing", "poing_ouvre_ferme", "main_relachee", "parasites"]
+NEGATIVE_LABELS = ["main_ouverte", "poing", "poing_ouvre_ferme", "main_relachee", "parasites",
+                   "main_repos_profil"]
 # Négatifs dont on compte les faux épisodes (la main ouverte sert à l'engagement, elle est
-# vue à part dans la matrice image par image).
-FALSE_EPISODE_LABELS = ["poing", "poing_ouvre_ferme", "main_relachee", "parasites"]
+# vue à part dans la matrice image par image). main_repos_profil : protocole v3 et suivants.
+FALSE_EPISODE_LABELS = ["poing", "poing_ouvre_ferme", "main_relachee", "parasites",
+                        "main_repos_profil"]
 EPISODE_LABELS = ["pincements_repetes"]
 OUT_OF_VOCABULARY_LABELS = ["pincement_vers_camera"]
 SETTLE_MS = 1000  # début de « pincement_maintenu » ignoré (mise en place du geste)
@@ -56,6 +58,9 @@ class Sample:
     # (None si le fichier n'a pas les colonnes des points, comme les CSV d'exemple).
     pinch_seg: float | None = None
     pinch_seg_68: float | None = None
+    # Orientation de la paume, recalculée elle aussi à partir des 21 points.
+    palm_width: float | None = None
+    palm_facing: float | None = None
 
     @property
     def hand_present(self) -> bool:
@@ -108,12 +113,16 @@ def read_dataset(path: Path) -> list[Sample]:
                 hand_size = float(record["hand_size"])
             pinch_seg = None
             pinch_seg_68 = None
+            width = None
+            facing = None
             points = landmarks_from_record(record)
             if points is not None:
                 # Points déjà relatifs au poignet, en unités homogènes et divisés par la
-                # taille de main : même calcul qu'en direct (features.pinch_segment).
+                # taille de main : même calcul qu'en direct (features.py).
                 pinch_seg = pinch_segment(points, 7)
                 pinch_seg_68 = pinch_segment(points, 6)
+                width = palm_width(points)
+                facing = palm_facing(points)
             samples.append(
                 Sample(
                     label=record["label"],
@@ -124,6 +133,8 @@ def read_dataset(path: Path) -> list[Sample]:
                     hand_size=hand_size,
                     pinch_seg=pinch_seg,
                     pinch_seg_68=pinch_seg_68,
+                    palm_width=width,
+                    palm_facing=facing,
                 )
             )
     return samples
@@ -202,7 +213,7 @@ def describe(values: list[float]) -> Stats | None:
 # « autres_max » = la plus grande extension parmi majeur, annulaire, auriculaire :
 # petite si tous ces doigts sont repliés (poing), c'est ce que testent les règles C et D.
 DESCRIPTORS = ["pinch_ratio", "pinch_seg", "pinch_seg_68", "ext_index", "ext_index_3d",
-               "ext_autres_max", "ext_autres_max_3d"]
+               "ext_autres_max", "ext_autres_max_3d", "palm_width", "palm_facing"]
 
 
 def descriptor_value(name: str, s: Sample) -> float | None:
@@ -213,6 +224,10 @@ def descriptor_value(name: str, s: Sample) -> float | None:
         return s.pinch_seg
     if name == "pinch_seg_68":
         return s.pinch_seg_68
+    if name == "palm_width":
+        return s.palm_width
+    if name == "palm_facing":
+        return s.palm_facing
     if name == "ext_index":
         return s.extensions[0]
     if name == "ext_index_3d":
@@ -258,7 +273,8 @@ def stats_by_label(samples: list[Sample]) -> dict[str, dict[str, Stats | None]]:
 
 
 def detects(rule: str, s: Sample, thresholds: RuleThresholds) -> bool:
-    return pinch_candidate(rule, s.pinch_ratio, s.extensions, s.extensions_3d, thresholds)
+    return pinch_candidate(rule, s.pinch_ratio, s.extensions, s.extensions_3d, thresholds,
+                           s.palm_width)
 
 
 @dataclass
@@ -337,8 +353,11 @@ class EpisodeSettings:
 
     def describe(self) -> str:
         fold = ", sortie si repli" if self.exit_on_fold else ""
+        palm = ""
+        if self.thresholds.require_palm_facing:
+            palm = f", paume >= {self.thresholds.min_palm_width:.2f}"
         return (f"règle {self.rule}, mesure {self.measure}, enter {self.thresholds.enter:.2f}, "
-                f"exit {self.exit:.2f}, délai {self.release_grace_ms:g} ms{fold}")
+                f"exit {self.exit:.2f}, délai {self.release_grace_ms:g} ms{fold}{palm}")
 
 
 def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list[Episode]:
@@ -374,7 +393,7 @@ def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list
 
         last_seen_ms = t
         value = measure_value(s, settings.measure)
-        event = hysteresis.update(t, value, s.extensions, s.extensions_3d)
+        event = hysteresis.update(t, value, s.extensions, s.extensions_3d, s.palm_width)
         if event == "start":
             start_ms = t
         elif event == "end":
@@ -697,20 +716,27 @@ def propose_thresholds(samples: list[Sample], enter: float) -> dict[str, Proposa
                 negatives.append(s)
 
     # Seuil à proposer -> descripteur qu'il coupe.
+    # « palm_facing » n'est pas un réglage : proposé seulement pour comparer avec palm_width.
     threshold_descriptors = {
         "min_index_extension": "ext_index",
         "folded_below": "ext_autres_max",
         "min_index_extension_3d": "ext_index_3d",
         "folded_below_3d": "ext_autres_max_3d",
+        "min_palm_width": "palm_width",
+        "palm_facing (comparaison)": "palm_facing",
     }
     proposals: dict[str, Proposal | None] = {}
     for threshold_name, descriptor in threshold_descriptors.items():
         pos_values = []
         for s in positives:
-            pos_values.append(descriptor_value(descriptor, s))
+            value = descriptor_value(descriptor, s)
+            if value is not None:
+                pos_values.append(value)
         neg_values = []
         for s in negatives:
-            neg_values.append(descriptor_value(descriptor, s))
+            value = descriptor_value(descriptor, s)
+            if value is not None:
+                neg_values.append(value)
         proposals[threshold_name] = propose_threshold(pos_values, neg_values)
     return proposals
 
@@ -718,13 +744,19 @@ def propose_thresholds(samples: list[Sample], enter: float) -> dict[str, Proposa
 def thresholds_from_proposals(
     proposals: dict[str, Proposal | None], current: RuleThresholds
 ) -> RuleThresholds:
-    """Seuils proposés quand ils existent, sinon les seuils actuels."""
+    """Seuils proposés quand ils existent, sinon les seuils actuels.
+
+    Pour min_palm_width, la proposition n'est retenue que si elle sépare vraiment (marge > 0) :
+    sinon on garde la valeur actuelle (provisoire). La condition de paume reste activée ou non
+    comme dans `current`.
+    """
     values = {}
     for name in ["min_index_extension", "folded_below", "min_index_extension_3d",
-                 "folded_below_3d"]:
+                 "folded_below_3d", "min_palm_width"]:
         proposal = proposals.get(name)
-        if proposal is None:
+        if proposal is None or (name == "min_palm_width" and proposal.margin <= 0):
             values[name] = getattr(current, name)
         else:
             values[name] = proposal.threshold
-    return RuleThresholds(enter=current.enter, **values)
+    return RuleThresholds(enter=current.enter, require_palm_facing=current.require_palm_facing,
+                          **values)

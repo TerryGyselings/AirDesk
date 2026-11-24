@@ -29,13 +29,33 @@ MODEL_URL = (
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[3] / "models" / "hand_landmarker.task"
 
 
+def user_side(handedness: str) -> str:
+    """Côté de la main pour l'UTILISATEUR ("right" / "left") à partir de l'étiquette MediaPipe.
+
+    MediaPipe suppose une image en miroir (« selfie »), ce qu'on lui donne (voir Camera).
+    Pourtant, mesuré le 2026-11-24 sur 2 sessions faites main DROITE, il répond « Left » sur
+    97 % des images (2 330/2 332 et 2 260/2 365) : avec notre chaîne, l'étiquette est
+    inversée. On la retourne donc ici, à un seul endroit (voir docs/journal.md).
+    """
+    if handedness == "Left":
+        return "right"
+    if handedness == "Right":
+        return "left"
+    return "unknown"
+
+
 @dataclass
 class Hand:
     """Une main détectée."""
 
     landmarks: list[tuple[float, float, float]]  # 21 points (x, y, z)
-    handedness: str  # "Left" ou "Right" (telle que vue par MediaPipe)
+    handedness: str  # "Left" ou "Right", étiquette BRUTE de MediaPipe (inversée, voir user_side)
     score: float  # confiance de la classification gauche/droite
+
+    @property
+    def side(self) -> str:
+        """Main de l'utilisateur : "right" ou "left" (étiquette corrigée)."""
+        return user_side(self.handedness)
 
 
 def ensure_model(path: Path = DEFAULT_MODEL_PATH) -> Path:

@@ -1,11 +1,14 @@
 import math
 
+import pytest
+
 from airdesk.interpretation.features import (
     compute_features,
     count_folded,
     normalize_landmarks,
     palm_center,
     point_segment_distance,
+    wrist_speed,
 )
 
 
@@ -197,6 +200,55 @@ def test_pinch_seg_does_not_depend_on_scale_or_rotation():
     c = compute_features(rotate_90(hand))
     assert abs(a.pinch_seg - b.pinch_seg) < 1e-9
     assert abs(a.pinch_seg - c.pinch_seg) < 1e-9
+
+
+def turn_around_vertical_axis(points, degrees):
+    """Tourne la main autour d'un axe vertical passant par le poignet (vers le profil).
+    x se contracte (cosinus) et z apparaît (sinus) ; z à l'échelle de x, comme MediaPipe."""
+    angle = math.radians(degrees)
+    x0 = points[0][0]
+    turned = []
+    for x, y, z in points:
+        dx = x - x0
+        turned.append((x0 + dx * math.cos(angle), y, z + dx * math.sin(angle)))
+    return turned
+
+
+def test_palm_width_and_facing_from_front_to_profile():
+    """Main synthétique : base index (0.44) -> base auriculaire (0.60) = 0.16, taille 0.20.
+    De face 0.80 ; tournée de 60° 0.40 ; de profil (80°) 0.14 ; palm_facing = cos(angle)."""
+    hand = make_hand(fingers_extended=True, pinch=False)
+    front = compute_features(hand)
+    assert front.palm_width == pytest.approx(0.80)
+    assert front.palm_facing == pytest.approx(1.0)
+    turned = compute_features(turn_around_vertical_axis(hand, 60))
+    assert turned.palm_width == pytest.approx(0.40)
+    assert turned.palm_facing == pytest.approx(0.5)
+    profile = compute_features(turn_around_vertical_axis(hand, 80))
+    assert profile.palm_width == pytest.approx(0.139, abs=0.001)
+    assert profile.palm_facing == pytest.approx(math.cos(math.radians(80)))
+
+
+def test_palm_measures_do_not_depend_on_scale():
+    hand = turn_around_vertical_axis(make_hand(fingers_extended=True, pinch=False), 45)
+    small = []
+    for x, y, z in hand:
+        small.append((0.5 + (x - 0.5) / 2, 0.5 + (y - 0.5) / 2, z / 2))
+    a = compute_features(hand)
+    b = compute_features(small)
+    assert a.palm_width == pytest.approx(b.palm_width)
+    assert a.palm_facing == pytest.approx(b.palm_facing)
+
+
+def test_wrist_speed_in_hand_sizes_per_second():
+    """Le poignet avance de 0.02 (largeur d'image) en 33 ms, image 640x480, taille 0.20 :
+    0.02 x 4/3 / 0.033 / 0.20 = 4.04 tailles de main par seconde."""
+    hand = make_hand(fingers_extended=True, pinch=False)
+    moved = []
+    for x, y, z in hand:
+        moved.append((x + 0.02, y, z))
+    assert wrist_speed(moved, hand, 0.033, aspect=640 / 480) == pytest.approx(4.04, abs=0.01)
+    assert wrist_speed(moved, hand, 0.0) is None
 
 
 def test_count_folded_uses_the_threshold():

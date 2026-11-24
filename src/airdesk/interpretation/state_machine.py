@@ -19,9 +19,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from airdesk.config import EngagementConfig, FingersConfig, PinchConfig
+from airdesk.config import EngagementConfig, FingersConfig, PinchConfig, PointerConfig
 from airdesk.interpretation.features import HandFeatures
 from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_measure
+from airdesk.interpretation.pointing import zone_to_screen
 
 
 class State(Enum):
@@ -40,6 +41,14 @@ class Move:
 
 
 @dataclass(frozen=True)
+class MoveTo:
+    """Position absolue du curseur, en fractions de l'écran (0 à 1) : pointage absolu."""
+
+    u: float
+    v: float
+
+
+@dataclass(frozen=True)
 class Click:
     pass
 
@@ -54,7 +63,7 @@ class Release:
     pass
 
 
-Event = Move | Click | Press | Release
+Event = Move | MoveTo | Click | Press | Release
 
 
 class GestureStateMachine:
@@ -65,6 +74,11 @@ class GestureStateMachine:
     mesure (pinch_ratio ou pinch_seg), enter / exit, délai de relâchement, sortie sur repli.
     Avec rule A, measure ratio et release_grace_ms 0, on retrouve le comportement d'origine.
     Choix de la configuration : voir scripts/analyse_gestures.py et docs/journal.md.
+
+    Pointage : `pointer.mode` "absolute" émet MoveTo (zone de l'image -> écran entier),
+    "relative" émet Move (déplacements). Sans `pointer`, pointage relatif (comportement
+    d'origine). Dans les deux cas, le curseur reste figé pendant un pincement court, pour
+    que le clic tombe à l'endroit visé.
     """
 
     def __init__(
@@ -72,11 +86,15 @@ class GestureStateMachine:
         engagement: EngagementConfig,
         pinch: PinchConfig,
         fingers: FingersConfig | None = None,
+        pointer: PointerConfig | None = None,
     ):
         if fingers is None:
             fingers = FingersConfig()
+        if pointer is None:
+            pointer = PointerConfig(mode="relative")
         self.engagement = engagement
         self.pinch = pinch
+        self.pointer = pointer
         self.state = State.IDLE
         thresholds = RuleThresholds(
             enter=pinch.enter,
@@ -84,6 +102,8 @@ class GestureStateMachine:
             folded_below=fingers.folded_below,
             min_index_extension_3d=pinch.min_index_extension_3d,
             folded_below_3d=fingers.folded_below_3d,
+            require_palm_facing=pinch.require_palm_facing,
+            min_palm_width=pinch.min_palm_width,
         )
         self._pinch_detector = PinchHysteresis(
             pinch.rule, thresholds, pinch.exit, pinch.release_grace_ms, pinch.exit_on_fold
@@ -92,6 +112,7 @@ class GestureStateMachine:
         self._pinch_start_ms: float = 0.0
         self._last_seen_ms: float | None = None
         self._prev_pointer: tuple[float, float] | None = None
+        self._last_target: tuple[float, float] | None = None  # dernier MoveTo émis
 
     def update(
         self,
@@ -133,11 +154,17 @@ class GestureStateMachine:
             return events
 
         # --- Déplacement du curseur (sauf pendant un pincement court, pour un clic précis) ---
-        if self._prev_pointer is not None and self.state != State.PINCHING:
-            dx = pointer[0] - self._prev_pointer[0]
-            dy = pointer[1] - self._prev_pointer[1]
-            if dx != 0 or dy != 0:
-                events.append(Move(dx, dy))
+        if self.state != State.PINCHING:
+            if self.pointer.mode == "absolute":
+                target = zone_to_screen(pointer[0], pointer[1], self.pointer.zone)
+                if target != self._last_target:
+                    events.append(MoveTo(target[0], target[1]))
+                    self._last_target = target
+            elif self._prev_pointer is not None:
+                dx = pointer[0] - self._prev_pointer[0]
+                dy = pointer[1] - self._prev_pointer[1]
+                if dx != 0 or dy != 0:
+                    events.append(Move(dx, dy))
         self._prev_pointer = pointer
 
         # --- Pincement : entrée / sortie confiées à PinchHysteresis ---
@@ -146,6 +173,7 @@ class GestureStateMachine:
             pinch_measure(features, self.pinch.measure),
             features.finger_extensions,
             features.finger_extensions_3d,
+            features.palm_width,
         )
 
         if self.state == State.ACTIVE:

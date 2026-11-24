@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +24,17 @@ class Row:
     state: str
     events: list[str]
     processing_ms: float
+    # Colonnes ajoutées plus tard (absentes des anciens logs) :
+    wrist_speed: float | None = None  # tailles de main par seconde
+    cursor: tuple[int, int] | None = None  # position calculée du curseur (pointage absolu)
+
+
+def optional_float(record: dict, name: str) -> float | None:
+    """Valeur d'une colonne, ou None si elle est vide ou absente (ancien format de log)."""
+    value = record.get(name)
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def read_log(path: Path) -> list[Row]:
@@ -30,6 +42,11 @@ def read_log(path: Path) -> list[Row]:
     rows: list[Row] = []
     with open(path, encoding="utf-8", newline="") as f:
         for record in csv.DictReader(f):
+            cursor = None
+            cursor_x = optional_float(record, "cursor_x")
+            cursor_y = optional_float(record, "cursor_y")
+            if cursor_x is not None and cursor_y is not None:
+                cursor = (int(cursor_x), int(cursor_y))
             pinch_ratio = None
             if record["pinch_ratio"] != "":
                 pinch_ratio = float(record["pinch_ratio"])
@@ -48,9 +65,71 @@ def read_log(path: Path) -> list[Row]:
                     state=record["state"],
                     events=events,
                     processing_ms=float(record["processing_ms"]),
+                    wrist_speed=optional_float(record, "wrist_speed"),
+                    cursor=cursor,
                 )
             )
     return rows
+
+
+# --- Tremblement du curseur quand la main est immobile -----------------------------------------
+
+# Main « immobile » : poignet à moins de 0,5 taille de main par seconde (≈ 4-5 cm/s) pendant
+# au moins 1 s. Le bruit du suivi seul donne de l'ordre de 0,1 taille de main par seconde.
+IMMOBILE_SPEED = 0.5
+IMMOBILE_MIN_MS = 1000
+JITTER_GOAL_PX = 2.0  # objectif : écart-type du curseur sous 2 pixels, main immobile
+
+
+@dataclass
+class StillPeriod:
+    start_ms: int
+    end_ms: int
+    frames: int
+    std_x: float  # écart-type de la position du curseur, en pixels
+    std_y: float
+
+    @property
+    def duration_ms(self) -> int:
+        return self.end_ms - self.start_ms
+
+    @property
+    def jitter(self) -> float:
+        """Tremblement retenu : le plus grand des deux écarts-types."""
+        return max(self.std_x, self.std_y)
+
+
+def still_periods(
+    rows: list[Row], max_speed: float = IMMOBILE_SPEED, min_duration_ms: int = IMMOBILE_MIN_MS
+) -> list[StillPeriod]:
+    """Périodes où la main est immobile, avec le tremblement du curseur pendant chacune.
+
+    Une période = images consécutives avec main, vitesse du poignet connue et < max_speed,
+    et position du curseur connue (pointage absolu), pendant au moins min_duration_ms.
+    """
+    periods: list[StillPeriod] = []
+    run: list[Row] = []
+    for row in rows + [None]:  # None final : ferme la dernière période
+        still = (
+            row is not None
+            and row.hand_present
+            and row.wrist_speed is not None
+            and row.wrist_speed < max_speed
+            and row.cursor is not None
+        )
+        if still:
+            run.append(row)
+            continue
+        if run and run[-1].timestamp_ms - run[0].timestamp_ms >= min_duration_ms:
+            xs = []
+            ys = []
+            for r in run:
+                xs.append(r.cursor[0])
+                ys.append(r.cursor[1])
+            periods.append(StillPeriod(run[0].timestamp_ms, run[-1].timestamp_ms, len(run),
+                                       statistics.pstdev(xs), statistics.pstdev(ys)))
+        run = []
+    return periods
 
 
 def read_metadata(path: Path) -> dict:

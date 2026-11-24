@@ -34,6 +34,23 @@ pinch:
   measure: ratio
   # Sortir aussi du pincement quand les autres doigts se replient (règles C, D...).
   exit_on_fold: false
+  # Entrée en pincement seulement si la paume fait face à la caméra : une main au repos
+  # de profil (pouce contre l'index) ne déclenche plus de clic.
+  require_palm_facing: true
+  # Largeur apparente minimale de la paume (base index 5 -> base auriculaire 17, divisée par
+  # la taille de main). PROVISOIRE, en attendant les mesures (séquence main_repos_profil) :
+  # - main synthétique : de face 0,80, tournée de 60° 0,40, de profil (80°) 0,14 ;
+  # - vrais pincements « OK » de P01 (2 sessions) : bien plus étroits, médiane 0,46, P5 0,26.
+  #   0,40 en rejetait 22 % / 35 % (répétés 9/10 -> 5/10 au test) ; 0,22 en rejette
+  #   0 % / 7,5 % et écarte encore une main franchement de profil.
+  min_palm_width: 0.22
+
+hand:
+  # Main suivie quand deux mains sont visibles : right, left ou any (côté de l'utilisateur).
+  preferred: right
+  # Une fois actif, on suit la main par continuité ; un saut du poignet plus grand que ça
+  # (en tailles de main, d'une image à l'autre) = main suivie perdue, l'autre est ignorée.
+  max_jump: 1.5
 
 quality:
   # Garde-fou : une image est ignorée (comme « main absente ») si hand_size tombe sous
@@ -50,8 +67,22 @@ fingers:
   folded_below_3d: 0.91
 
 pointer:
-  # Gain contrôle/affichage (pointage relatif, comme un pavé tactile) :
-  # nombre de pixels parcourus par le curseur quand la main traverse toute la largeur de l'image.
+  # absolute : la zone d'interaction de l'image est projetée sur l'écran entier (la main et
+  #            le curseur ne se désynchronisent pas) ;
+  # relative : comme un pavé tactile (gain pixels_per_frame_width).
+  mode: absolute
+  # Zone d'interaction, en fractions de l'image (0 = bord gauche / haut, 1 = droit / bas).
+  # Hors zone, le curseur reste collé au bord de l'écran. Dessinée dans la fenêtre de debug.
+  zone:
+    left: 0.15
+    right: 0.85
+    top: 0.15
+    bottom: 0.75
+  # Écran couvert en mode absolu : primary (écran principal) ou all (rectangle englobant de
+  # tous les écrans ; voir les limites dans le README).
+  screen: primary
+  # Gain du mode relatif : nombre de pixels parcourus par le curseur quand la main traverse
+  # toute la largeur de l'image.
   pixels_per_frame_width: 2400
   # Point de la main qui pilote le curseur (index MediaPipe). 9 = base du majeur, stable pendant le pincement.
   landmark: 9
@@ -61,6 +92,18 @@ filter:
   # beta haut = moins de retard quand la main bouge vite.
   # Les positions sont normalisées (0 à 1), d'où un beta plus grand que dans
   # l'article, qui travaille en pixels (environ 0,007 x 1280 px de large ≈ 9).
-  min_cutoff: 1.0
-  beta: 8.0
-  d_cutoff: 1.0
+  # Réglage séparé par mode, car le bruit de la main n'est pas amplifié pareil.
+  absolute:
+    # Valeurs de départ PROVISOIRES (objectif : tremblement < 2 px main immobile, mesuré par
+    # scripts/analyse_log.py). En absolu, 1 pixel caméra ≈ 5,7 px écran (2560 / (640 × 0,70))
+    # contre 3,75 px en relatif (2400 / 640) : bruit amplifié ≈ 1,5 fois. Pour un passe-bas
+    # du 1er ordre et un bruit blanc, l'écart-type restant varie comme √(coupure) : diviser
+    # le tremblement par 1,5 demande une coupure divisée par 1,5² ≈ 2,25, soit 1,0 -> 0,45,
+    # arrondi à 0,5. beta inchangé pour garder la réactivité sur les gestes rapides.
+    min_cutoff: 0.5
+    beta: 8.0
+    d_cutoff: 1.0
+  relative:
+    min_cutoff: 1.0
+    beta: 8.0
+    d_cutoff: 1.0

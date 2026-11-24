@@ -16,8 +16,8 @@ Projet innovation-recherche — ESIR, Université de Rennes (2026-2027).
 
 | Geste | Effet |
 | --- | --- |
-| Main ouverte face à la caméra pendant 0,3 s | Active le contrôle |
-| Déplacer la main | Déplace le curseur |
+| Main ouverte face à la caméra pendant 0,3 s | Active le contrôle (et choisit la main suivie) |
+| Déplacer la main dans la zone d'interaction | Place le curseur (pointage absolu) |
 | Pincement bref pouce-index (< `click_max_ms`, 0,4 s) | Clic gauche |
 | Pincement maintenu puis déplacement | Glisser-déposer (ex. déplacer une fenêtre par sa barre de titre) |
 | Main hors du champ plus de 1 s | Retour en veille |
@@ -34,7 +34,35 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
   Pendant un glisser, garder pouce et index collés et bouger la main sans à-coups.
 - **Non reconnu** : le pincement index pointé vers la caméra, autres doigts repliés. C'est
   une décision de conception : ce geste ressemble trop à un poing pour être distingué de
-  façon fiable.
+  façon fiable. Une main au repos **de profil** (pouce contre l'index) n'est pas non plus
+  prise pour un pincement : il faut que la paume fasse face à la caméra
+  (`pinch.require_palm_facing`, `min_palm_width`).
+
+**Pointage** (`pointer` dans `gestures.yaml`) :
+
+- **Absolu (par défaut)** : une **zone d'interaction** de l'image (par défaut 15 %..85 % en
+  largeur, 15 %..75 % en hauteur) correspond à tout l'écran. Elle est dessinée en bleu clair
+  dans la fenêtre de debug : y garder la main. Hors zone, le curseur reste collé au bord.
+  Le curseur ne se désynchronise jamais de la main. Il reste figé pendant un pincement court,
+  pour que le clic tombe où l'on visait.
+- **Relatif** (`mode: relative`) : comme un pavé tactile, la main déplace le curseur.
+- **Plusieurs écrans** : en absolu, seul l'**écran principal** est couvert
+  (`screen: primary`) ; les autres écrans ne sont pas accessibles. `screen: all` couvre le
+  rectangle qui englobe tous les écrans, mais si les écrans n'ont pas la même taille ou sont
+  décalés (ex. un écran vertical à côté d'un écran horizontal), ce rectangle contient des
+  zones sans écran où le curseur bute. Pour passer souvent d'un écran à l'autre, préférer le
+  mode relatif.
+- **Échelle d'affichage** : avec une échelle Windows différente de 100 % (125 %, 150 %...),
+  un décalage entre la position visée et le curseur est possible.
+- Le filtre 1€ se règle séparément pour chaque mode (`filter.absolute`, `filter.relative`) :
+  en absolu, le bruit de la main est plus amplifié. `airdesk --log` puis
+  `python scripts/analyse_log.py` mesurent le tremblement du curseur main immobile
+  (objectif < 2 px).
+
+**Deux mains dans le champ** : AirDesk suit la main qui fait le geste d'activation, en
+préférant `hand.preferred` (droite par défaut). Une fois actif, il suit cette main par
+continuité et ignore l'autre (affichée en gris dans la fenêtre de debug), jusqu'au retour
+en veille.
 
 ## Installation
 
@@ -148,6 +176,9 @@ python scripts/analyse_gestures.py data/datasets/A.csv data/datasets/B.csv --tes
   (pouce → dernière phalange de l'index, variante `pinch_seg_68` sur deux phalanges).
 - Protocole v2 de `record_gestures.py` : consigne du pincement maintenu précisée (doigts
   collés, petits mouvements lents) et position / vitesse du poignet enregistrées.
+  Protocole v3 : séquence négative `main_repos_profil` (main détendue de côté, pouce contre
+  l'index) et orientation de la paume (`palm_width`, `palm_facing`), pour régler
+  `min_palm_width`.
 - **Configuration en service** (`config/gestures.yaml`) : règle D, mesure `ratio`,
   enter 0,25 / exit 0,40, délai de relâchement 66 ms, sans sortie sur repli. `rule: A` et
   `release_grace_ms: 0` redonnent le comportement d'origine, pour comparer.
@@ -203,9 +234,10 @@ ruff check .    # style et erreurs courantes
 ```
 src/airdesk/
 ├── capture/         1. webcam (OpenCV) : choix du backend, détection d'image noire, repli
-├── perception/      2. squelette de la main (MediaPipe) + filtre 1€
-├── interpretation/  3. descripteurs (pincement, doigts tendus) + machine à états
-├── actuator/        4. actions sur le système (souris via pynput)
+├── perception/      2. squelette des mains (MediaPipe, 2 mains) + filtre 1€
+├── interpretation/  3. descripteurs, règles de pincement, choix de la main, zone -> écran,
+│                       machine à états
+├── actuator/        4. actions sur le système (souris via pynput, écrans via PyMonCtl)
 ├── ui/              5. retour visuel (fenêtre de debug)
 ├── app.py           boucle principale qui relie les couches
 ├── config.py        réglages : gestures.yaml + local.yaml + ligne de commande

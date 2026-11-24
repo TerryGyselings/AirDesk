@@ -53,6 +53,7 @@ SHORT_NAMES = {
     "poing_ouvre_ferme": "poing o/f",
     "main_relachee": "relachee",
     "parasites": "parasites",
+    "main_repos_profil": "profil",
     "pincements_repetes": "repetes",
     "pincement_vers_camera": "hors voc.",
 }
@@ -117,12 +118,18 @@ def load_settings(csv_paths: list[Path]) -> Settings:
         quality = {"hand_size_window_ms": cfg.quality.hand_size_window_ms}
         seconds = 10
         participants = ["?"]
+    # Les jeux de données enregistrés avant la condition de paume n'ont pas min_palm_width :
+    # on prend alors la valeur provisoire actuelle de gestures.yaml.
+    min_palm_width = pinch.get("min_palm_width")
+    if not min_palm_width:
+        min_palm_width = load_config(local_path=None).pinch.min_palm_width
     thresholds = RuleThresholds(
         enter=pinch["enter"],
         min_index_extension=pinch["min_index_extension"],
         folded_below=fingers["folded_below"],
         min_index_extension_3d=pinch["min_index_extension_3d"],
         folded_below_3d=fingers["folded_below_3d"],
+        min_palm_width=min_palm_width,
     )
     return Settings(
         thresholds=thresholds,
@@ -196,17 +203,20 @@ def configurations(learned: RuleThresholds, measures: list[str]) -> list[Episode
     """Toutes les configurations du balayage."""
     configs = []
     for rule in SWEEP_RULES:
+        # Les variantes « repli » et « paume » n'ont de sens que pour la règle D.
+        folds = [False, True] if rule == "D" else [False]
+        palms = [False, True] if rule == "D" else [False]
         for measure in measures:
             pairs = RATIO_THRESHOLDS if measure == "ratio" else SEG_THRESHOLDS
             for enter, exit_value in pairs:
-                thresholds = replace(learned, enter=enter)
-                for grace in SWEEP_GRACES:
-                    folds = [False, True] if rule == "D" else [False]
-                    for exit_on_fold in folds:
-                        configs.append(EpisodeSettings(
-                            rule, thresholds, exit_value, grace, measure=measure,
-                            exit_on_fold=exit_on_fold,
-                        ))
+                for palm in palms:
+                    thresholds = replace(learned, enter=enter, require_palm_facing=palm)
+                    for grace in SWEEP_GRACES:
+                        for exit_on_fold in folds:
+                            configs.append(EpisodeSettings(
+                                rule, thresholds, exit_value, grace, measure=measure,
+                                exit_on_fold=exit_on_fold,
+                            ))
     return configs
 
 
@@ -215,6 +225,7 @@ def print_sweep_row(row: SweepRow) -> None:
     tr = row.train
     te = row.test
     fold = "oui" if s.exit_on_fold else "non"
+    palm = "oui" if s.thresholds.require_palm_facing else "non"
     ruptures = pair(tr.ruptures, te.ruptures if te else None)
     clicks = pair(tr.false_clicks, te.false_clicks if te else None)
     drags = pair(tr.false_drags, te.false_drags if te else None)
@@ -225,13 +236,14 @@ def print_sweep_row(row: SweepRow) -> None:
     out_of_vocabulary = pair(tr.out_of_vocabulary, te.out_of_vocabulary if te else None)
     print(
         f"  {s.rule:<3} {s.measure:<6} {s.thresholds.enter:4.2f} {s.exit:4.2f} "
-        f"{s.release_grace_ms:>4g} {fold:<4}"
+        f"{s.release_grace_ms:>4g} {fold:<4} {palm:<4}"
         f" | {ruptures:<7} | {clicks:<8} | {drags:<9} | {repeated:<13} | {out_of_vocabulary:<7}"
     )
 
 
 def print_sweep(rows: list[SweepRow], has_test: bool, ruptures_reliable: bool) -> None:
     header = (f"  {'rg.':<3} {'mesure':<6} {'ent.':>4} {'exit':>4} {'dél.':>4} {'repli':<4}"
+              f" {'paume':<4}"
               f" | {'rupt.':<7} | {'f.clics':<8} | {'f.gliss.':<9} | {'répétés':<13} | hors v.")
     ranked = rank(rows, ruptures_reliable)
     print(f"  {len(rows)} configurations ; les {SHOWN_ROWS} premières du classement "
@@ -243,15 +255,16 @@ def print_sweep(rows: list[SweepRow], has_test: bool, ruptures_reliable: bool) -
     for row in rows:
         s = row.settings
         if (s.rule, s.measure, s.thresholds.enter, s.exit, s.release_grace_ms) == \
-                ("A", "ratio", 0.25, 0.40, 0) and not s.exit_on_fold:
+                ("A", "ratio", 0.25, 0.40, 0) and not s.exit_on_fold and \
+                not s.thresholds.require_palm_facing:
             print("  " + "." * (len(header) - 2))
             print("  référence (configuration d'origine) :")
             print_sweep_row(row)
     where = "entraînement / test" if has_test else "entraînement"
     print(f"\n  Cellules : {where}. rupt. = sorties pendant le pincement maintenu (idéal 0) ;")
     print("  f.clics / f.gliss. = faux épisodes courts / longs (poing, poing o/f, main relâchée,")
-    print("  parasites) ; répétés = détectés / attendus ; repli = sortie si les doigts se")
-    print("  replient.")
+    print("  parasites, main au repos de profil) ; répétés = détectés / attendus ; repli =")
+    print("  sortie si les doigts se replient ; paume = entrée seulement paume face caméra.")
 
     best = recommend(rows, ruptures_reliable)
     print("\n  Recommandation : filtres (0 faux glisser, au plus 1 faux clic) et classement sur")
@@ -279,7 +292,8 @@ def write_sweep_csv(path: Path, rows: list[SweepRow]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        header = ["rule", "measure", "enter", "exit", "release_grace_ms", "exit_on_fold"]
+        header = ["rule", "measure", "enter", "exit", "release_grace_ms", "exit_on_fold",
+                  "require_palm_facing", "min_palm_width"]
         for dataset in ("train", "test"):
             for name in ("ruptures", "false_clicks", "false_drags", "repeated_detected",
                          "repeated_expected", "out_of_vocabulary"):
@@ -288,7 +302,7 @@ def write_sweep_csv(path: Path, rows: list[SweepRow]) -> None:
         for row in rows:
             s = row.settings
             line = [s.rule, s.measure, s.thresholds.enter, s.exit, s.release_grace_ms,
-                    s.exit_on_fold]
+                    s.exit_on_fold, s.thresholds.require_palm_facing, s.thresholds.min_palm_width]
             for m in (row.train, row.test):
                 if m is None:
                     line += [""] * 6
@@ -365,7 +379,12 @@ def main() -> None:
     learned = thresholds_from_proposals(proposals, current)
     print(f"\nSeuils utilisés pour B/C/D : min_index_extension="
           f"{learned.min_index_extension:.2f} (3D {learned.min_index_extension_3d:.2f}), "
-          f"folded_below={learned.folded_below:.2f} (3D {learned.folded_below_3d:.2f})")
+          f"folded_below={learned.folded_below:.2f} (3D {learned.folded_below_3d:.2f}), "
+          f"min_palm_width={learned.min_palm_width:.2f}")
+    palm_proposal = proposals.get("min_palm_width")
+    if palm_proposal is None or palm_proposal.margin <= 0:
+        print(f"  min_palm_width : valeur PROVISOIRE gardée ({learned.min_palm_width:.2f}), la "
+              "proposition ne sépare pas (il faut la séquence main_repos_profil, protocole v3).")
 
     title("ENTRAÎNEMENT : règles, image par image")
     print_rules(train, learned, exit_, settings.seconds)

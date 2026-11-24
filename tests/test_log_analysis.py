@@ -29,6 +29,7 @@ from airdesk.log_analysis import (
     pinch_thresholds,
     read_log,
     read_metadata,
+    still_periods,
     summarize,
     text_histogram,
 )
@@ -175,11 +176,60 @@ class FakeFeatures:
     folded_fingers_3d: int = 0
     pinch_seg: float = 0.7
     pinch_seg_68: float = 0.6
+    palm_width: float = 0.8
+    palm_facing: float = 1.0
 
 
 def test_event_names():
     assert event_names([Move(0.1, 0.0), Click()]) == "move+click"
     assert event_names([]) == ""
+
+
+def row_at(t, speed, cursor, hand=True):
+    return Row(t, hand, 0.8 if hand else None, 4 if hand else None, "actif", [], 10.0,
+               wrist_speed=speed, cursor=cursor)
+
+
+def test_still_periods_measure_cursor_jitter():
+    """1,5 s de main immobile (curseur qui oscille de ±2 px en x), puis un geste rapide,
+    puis 0,5 s immobile (trop court pour compter)."""
+    rows = []
+    t = 0
+    for i in range(46):  # 0 à 1 485 ms
+        rows.append(row_at(t, 0.1, (1000 + (2 if i % 2 else -2), 500)))
+        t += 33
+    for _ in range(5):
+        rows.append(row_at(t, 3.0, (1200, 600)))  # main qui bouge vite
+        t += 33
+    for _ in range(15):  # 0,5 s seulement
+        rows.append(row_at(t, 0.1, (1200, 600)))
+        t += 33
+    periods = still_periods(rows)
+    assert len(periods) == 1
+    p = periods[0]
+    assert p.frames == 46
+    assert p.std_x == pytest.approx(2.0)  # écart-type de ±2 px
+    assert p.std_y == 0.0
+    assert p.jitter == pytest.approx(2.0)
+
+
+def test_still_periods_need_a_hand_and_a_cursor():
+    rows = []
+    for i in range(60):
+        rows.append(row_at(i * 33, 0.1, None))  # pointage relatif : pas de curseur absolu
+    assert still_periods(rows) == []
+
+
+def test_old_logs_without_new_columns_are_still_readable(tmp_path):
+    path = tmp_path / "ancien.csv"
+    path.write_text(
+        "timestamp_ms,hand_present,pinch_ratio,extended_fingers,state,events,processing_ms\n"
+        "0,1,0.8,4,actif,,10.0\n",
+        encoding="utf-8",
+    )
+    row = read_log(path)[0]
+    assert row.wrist_speed is None
+    assert row.cursor is None
 
 
 def test_session_log_round_trip(tmp_path):

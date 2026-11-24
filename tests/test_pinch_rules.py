@@ -141,6 +141,33 @@ def test_exit_on_fold_has_no_effect_on_rule_a():
     assert run_with_fingers(h, [(0.1, POING), (0.1, POING)]) == [("start", 0)]
 
 
+PALM = RuleThresholds(enter=0.25, folded_below=0.8, require_palm_facing=True,
+                      min_palm_width=0.40)
+
+
+def test_palm_condition_rejects_a_hand_in_profile():
+    assert pinch_candidate("D", 0.1, TENDUS, TENDUS, PALM, palm_width=0.80)
+    assert not pinch_candidate("D", 0.1, TENDUS, TENDUS, PALM, palm_width=0.15)
+    assert not pinch_candidate("A", 0.1, TENDUS, TENDUS, PALM, palm_width=0.15)  # toute règle
+
+
+def test_unknown_palm_width_does_not_block():
+    """Ancien jeu de données sans les 21 points : pas de largeur de paume, pas de blocage."""
+    assert pinch_candidate("D", 0.1, TENDUS, TENDUS, PALM, palm_width=None)
+
+
+def test_palm_condition_disabled_has_no_effect():
+    assert pinch_candidate("D", 0.1, TENDUS, TENDUS, T, palm_width=0.15)
+
+
+def test_palm_condition_only_affects_the_entry():
+    """Une fois pincé, tourner la main de profil ne relâche pas (seule l'entrée est filtrée)."""
+    h = PinchHysteresis("D", PALM, exit=0.40)
+    assert h.update(0, 0.1, TENDUS, TENDUS, palm_width=0.80) == "start"
+    assert h.update(33, 0.1, TENDUS, TENDUS, palm_width=0.15) is None
+    assert h.pinched
+
+
 def test_pinch_measure_selects_the_value():
     class Features:
         pinch_ratio = 0.5

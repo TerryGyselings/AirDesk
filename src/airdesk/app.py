@@ -1,8 +1,8 @@
 """Boucle principale : relie les cinq couches.
 
-    webcam -> squelette de la main -> filtre 1€ -> machine à états -> souris
-                                                       \\-> fenêtre de debug
-                                                       \\-> journal de mesures (--log)
+    webcam -> mains (MediaPipe) -> choix de la main -> filtre 1€ -> machine à états -> souris
+                                                                        \\-> fenêtre de debug
+                                                                        \\-> journal (--log)
 """
 
 from __future__ import annotations
@@ -14,15 +14,26 @@ from pathlib import Path
 
 import cv2
 
-from airdesk.actuator import create_actuator
+from airdesk.actuator import create_actuator, detect_screen
 from airdesk.capture import Camera
 from airdesk.config import apply_cli_overrides, load_config
-from airdesk.interpretation import GestureStateMachine, compute_features
+from airdesk.interpretation import GestureStateMachine, State, compute_features
+from airdesk.interpretation.features import MIDDLE_MCP, WRIST, distance_2d, wrist_speed
+from airdesk.interpretation.hand_selection import HandCandidate, HandSelector
+from airdesk.interpretation.pointing import zone_to_screen
 from airdesk.perception import HandTracker, PointFilter
 from airdesk.session_log import SessionLog, build_metadata
 from airdesk.ui import draw_debug
 
 WINDOW_NAME = "AirDesk - debug (q ou Echap pour quitter)"
+
+
+def hand_candidate(hand, features, aspect: float) -> HandCandidate:
+    """Ce dont le sélecteur de main a besoin, en unités homogènes (x multiplié par l'aspect)."""
+    wx, wy, _ = hand.landmarks[WRIST]
+    mx, my, _ = hand.landmarks[MIDDLE_MCP]
+    size = distance_2d((wx * aspect, wy, 0.0), (mx * aspect, my, 0.0))
+    return HandCandidate((wx * aspect, wy), size, hand.side, features.open_palm)
 
 
 def run(
@@ -41,17 +52,28 @@ def run(
     camera_cfg = apply_cli_overrides(cfg.camera, camera_index, backend, width, height)
     cfg = replace(cfg, camera=camera_cfg)  # config effective, enregistrée avec le log
 
-    actuator = create_actuator(dry_run, cfg.pointer.pixels_per_frame_width)
-    machine = GestureStateMachine(cfg.engagement, cfg.pinch, cfg.fingers)
-    pointer_filter = PointFilter(cfg.filter.min_cutoff, cfg.filter.beta, cfg.filter.d_cutoff)
+    absolute = cfg.pointer.mode == "absolute"
+    screen = None
+    if absolute:
+        screen = detect_screen(cfg.pointer.screen)
+        print(f"Pointage absolu sur l'écran {cfg.pointer.screen} : {screen.width}x{screen.height}"
+              f" en ({screen.x}, {screen.y})")
+    else:
+        print("Pointage relatif (comme un pavé tactile).")
+    actuator = create_actuator(dry_run, cfg.pointer.pixels_per_frame_width, screen)
+    machine = GestureStateMachine(cfg.engagement, cfg.pinch, cfg.fingers, cfg.pointer)
+    selector = HandSelector(cfg.hand.preferred, cfg.hand.max_jump)
+    filter_cfg = cfg.filter.for_mode(cfg.pointer.mode)
+    pointer_filter = PointFilter(filter_cfg.min_cutoff, filter_cfg.beta, filter_cfg.d_cutoff)
 
     fps = 0.0
     last_frame_time = time.perf_counter()
+    previous_hand = None  # (timestamp_ms, landmarks) de la main suivie, pour sa vitesse
 
     print(f"Ouverture de la caméra {camera_cfg.index} (quelques secondes)...")
     forced_backend = None if camera_cfg.backend == "auto" else camera_cfg.backend
     camera = Camera(camera_cfg.index, camera_cfg.width, camera_cfg.height, backend=forced_backend)
-    with camera as cam, HandTracker(max_hands=1) as tracker:
+    with camera as cam, HandTracker(max_hands=2) as tracker:
         # Les essais écartés expliquent pourquoi on n'a pas eu le backend ou la résolution
         # demandés (ex. « dshow, 1280x720 : trop lent » puis « 640x480 : ok »).
         for attempt in cam.attempts:
@@ -65,7 +87,11 @@ def run(
 
         # Sans --log, nullcontext() est un « with » qui ne fait rien et donne None.
         if log:
-            session = SessionLog(build_metadata(cfg, info.summary()))
+            metadata = build_metadata(cfg, info.summary())
+            if screen is not None:
+                metadata["screen"] = {"x": screen.x, "y": screen.y, "width": screen.width,
+                                      "height": screen.height}
+            session = SessionLog(metadata)
         else:
             session = nullcontext()
 
@@ -75,25 +101,38 @@ def run(
             print("AirDesk démarré. Montre ta main ouverte face à la caméra pour activer.")
             for frame in cam.frames():
                 t_start = time.perf_counter()
+                frame_height, frame_width = frame.bgr.shape[:2]
+                aspect = frame_width / frame_height
 
+                # 1) Toutes les mains, leurs descripteurs, puis le choix de la main suivie.
                 hands = tracker.detect(frame.rgb, frame.timestamp_ms)
-                hand = hands[0] if hands else None
+                all_features = []
+                candidates = []
+                for hand in hands:
+                    f = compute_features(hand.landmarks, cfg.fingers.folded_below,
+                                         cfg.fingers.folded_below_3d, aspect=aspect)
+                    all_features.append(f)
+                    candidates.append(hand_candidate(hand, f, aspect))
+                selected = selector.select(candidates, idle=machine.state == State.IDLE)
 
                 features = None
                 pointer = None
-                if hand is not None:
-                    height, width = frame.bgr.shape[:2]
-                    features = compute_features(
-                        hand.landmarks,
-                        cfg.fingers.folded_below,
-                        cfg.fingers.folded_below_3d,
-                        aspect=width / height,
-                    )
+                hand = None
+                speed = None
+                if selected is not None:
+                    hand = hands[selected]
+                    features = all_features[selected]
                     raw = hand.landmarks[cfg.pointer.landmark]
                     pointer = pointer_filter(raw[0], raw[1], frame.timestamp_ms / 1000.0)
+                    if previous_hand is not None:
+                        dt_s = (frame.timestamp_ms - previous_hand[0]) / 1000.0
+                        speed = wrist_speed(hand.landmarks, previous_hand[1], dt_s, aspect)
+                    previous_hand = (frame.timestamp_ms, hand.landmarks)
                 else:
                     pointer_filter.reset()
+                    previous_hand = None
 
+                # 2) Interprétation puis action.
                 events = machine.update(frame.timestamp_ms, features, pointer)
                 for event in events:
                     actuator.apply(event)
@@ -106,13 +145,23 @@ def run(
                     fps = 0.9 * fps + 0.1 * (1.0 / dt)  # moyenne glissante, plus lisible
 
                 if logger is not None:
+                    wrist = None
+                    cursor = None
+                    if hand is not None:
+                        wrist = (hand.landmarks[WRIST][0], hand.landmarks[WRIST][1])
+                        if absolute:
+                            u, v = zone_to_screen(pointer[0], pointer[1], cfg.pointer.zone)
+                            cursor = actuator.to_pixels(u, v)
                     logger.write_frame(
-                        frame.timestamp_ms, features, machine.state.value, events, processing_ms
+                        frame.timestamp_ms, features, machine.state.value, events,
+                        processing_ms, wrist=wrist, wrist_speed=speed, cursor=cursor,
                     )
 
                 if show_preview:
+                    zone = cfg.pointer.zone if absolute else None
                     image = draw_debug(
-                        frame.bgr, hand, features, machine.state, fps, processing_ms
+                        frame.bgr, hands, selected, features, machine.state, fps,
+                        processing_ms, zone,
                     )
                     cv2.imshow(WINDOW_NAME, image)
                     key = cv2.waitKey(1) & 0xFF

@@ -145,3 +145,44 @@ Ce journal sert de matière première au rapport final.
 - À faire : sessions protocole v2 (plusieurs participants), puis réévaluer pinch_seg,
   exit_on_fold et le délai sur des ruptures fiables, et relier les ruptures à la vitesse du
   poignet.
+
+## 2026-11-24 — Premier usage réel : paume de profil, pointage absolu, choix de la main
+
+Retour d'usage réel de P01 (sans --dry-run) : « ça marche bien », avec trois défauts.
+
+1. **Main de profil au repos = faux clic / glisser.** Au repos, main de côté, le pouce
+   rejoint l'index et les autres doigts sont à moitié ouverts : la règle D accepte.
+   - Descripteurs ajoutés : `palm_width` (distance 5 -> 17 / taille de main, 2D homogène)
+     et `palm_facing` (|composante z| de la normale (P5−P0) × (P17−P0)).
+   - Condition d'entrée `require_palm_facing` + `min_palm_width`, et nouvelle séquence
+     négative `main_repos_profil` (protocole v3).
+   - **Surprise des mesures** : les vrais pincements « OK » de P01 ont une paume étroite
+     (palm_width médiane 0,46, P5 0,26 ; main synthétique de face : 0,80). La valeur
+     provisoire synthétique de 0,40 rejetait 22 % / 35 % des images de pincement maintenu
+     et faisait tomber les pincements répétés de 9/10 à 5/10 au test. **Décision (P01) :
+     0,22**, sous le P5 des vrais pincements ; elle écarte encore une main franchement de
+     profil (synthétique à 80° : 0,14). À régler avec une session v3.
+   - Sur les anciens fichiers, ni palm_width ni palm_facing ne séparent pincement et
+     négatifs (J ≈ 0). C'est attendu : ils n'ont pas de séquence de main de profil.
+2. **Désynchronisation main / curseur** (pointage relatif) : nouveau pointage **absolu** par
+   défaut. La zone d'interaction (15 %..85 % × 15 %..75 % de l'image) est projetée sur
+   l'écran principal (PyMonCtl ; pywinctl.getScreenSize est déprécié), et collée aux bords
+   hors zone. Le curseur reste figé pendant un pincement court.
+   - Tremblement : en absolu, 1 px caméra ≈ 5,7 px écran (contre 3,75 en relatif). Filtre 1€
+     réglé par mode ; valeur de départ en absolu min_cutoff 0,5 (au lieu de 1,0), car pour
+     un passe-bas et un bruit blanc, l'écart-type restant varie comme √(coupure)
+     (Casiez et al., 2012).
+   - Mesure ajoutée : position du curseur et vitesse du poignet dans `--log` ;
+     `analyse_log.py` donne l'écart-type du curseur pendant les périodes immobiles
+     (≥ 1 s, poignet < 0,5 taille de main/s). Objectif < 2 px, **pas encore mesuré**.
+   - Multi-écrans : `pointer.screen: primary | all`. Limite : le rectangle englobant de
+     deux écrans de formats différents contient des zones sans écran.
+3. **Suivi de la mauvaise main** : 2 mains détectées. En veille, on prend la main qui fait le
+   geste d'activation (préférence `hand.preferred`). Une fois actif, on suit la main par
+   continuité (poignet le plus proche, saut maximal de 1,5 taille de main), et l'autre est
+   ignorée. Le verrou saute au retour en veille.
+   - **Latéralité MediaPipe inversée** avec notre image en miroir : sur 2 sessions main
+     droite, « Left » sur 97 % des images. Corrigé à un seul endroit
+     (`hand_tracker.user_side`).
+- Vérifié : 178 tests ; démarrage réel sans erreur (écran 2560x1440 détecté, colonnes du
+  log). **Pas encore testé en usage réel** : pointage absolu, deux mains, main de profil.

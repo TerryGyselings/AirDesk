@@ -10,15 +10,19 @@ from __future__ import annotations
 from pynput.mouse import Button, Controller
 
 from airdesk.actuator.base import Actuator
+from airdesk.actuator.screen import ScreenRect
 
 
 class MouseActuator(Actuator):
-    def __init__(self, pixels_per_frame_width: float):
-        super().__init__(pixels_per_frame_width)
+    def __init__(self, pixels_per_frame_width: float, screen: ScreenRect | None = None):
+        super().__init__(pixels_per_frame_width, screen)
         self._mouse = Controller()
 
     def move_by(self, dx_px: int, dy_px: int) -> None:
         self._mouse.move(dx_px, dy_px)
+
+    def move_to(self, x_px: int, y_px: int) -> None:
+        self._mouse.position = (x_px, y_px)
 
     def click(self) -> None:
         self._mouse.click(Button.left, 1)

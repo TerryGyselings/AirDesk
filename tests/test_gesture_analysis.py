@@ -24,6 +24,8 @@ from airdesk.gesture_analysis import (
     EPISODE_LABELS,
     EXT3D_COLUMNS,
     EXT_COLUMNS,
+    FALSE_EPISODE_LABELS,
+    NEGATIVE_LABELS,
     OUT_OF_VOCABULARY_LABELS,
     POSITIVE_LABEL,
     EpisodeMetrics,
@@ -226,6 +228,60 @@ def test_rule_d_keeps_every_pinch_below_enter_and_rejects_fist_and_parasites(tra
         assert (c.true_positives, c.false_negatives) == (3, 1)
         assert c.false_positives["poing"] == 0
         assert c.false_positives["parasites"] == 0
+
+
+def test_rest_hand_in_profile_is_a_negative_label():
+    assert "main_repos_profil" in NEGATIVE_LABELS
+    assert "main_repos_profil" in FALSE_EPISODE_LABELS
+
+
+def test_palm_measures_are_computed_from_landmarks(tmp_path):
+    """Paume de face, points normalisés : base index (-0.3, -1) et auriculaire (0.5, -1)."""
+    points = [(0.0, 0.0, 0.0)] * 21
+    points[9] = (0.0, -1.0, 0.0)
+    points[5] = (-0.3, -1.0, 0.0)
+    points[17] = (0.5, -1.0, 0.0)
+    header = ["label", "t_in_sequence_ms", "hand_present", "pinch_ratio", "hand_size"]
+    header += EXT_COLUMNS + EXT3D_COLUMNS
+    values = ["main_repos_profil", "0", "1", "0.1", "0.2"] + ["1.5"] * 8
+    for i in range(21):
+        header += [f"x{i}", f"y{i}", f"z{i}"]
+        values += [str(points[i][0]), str(points[i][1]), str(points[i][2])]
+    path = tmp_path / "paume.csv"
+    path.write_text(",".join(header) + "\n" + ",".join(values) + "\n", encoding="utf-8")
+    sample = read_dataset(path)[0]
+    assert sample.palm_width == pytest.approx(0.8)
+    assert sample.palm_facing == pytest.approx(1.0)
+
+
+def palm_frame(label, i, palm):
+    s = frame(label, i, 0.1)
+    s.palm_width = palm
+    return s
+
+
+def test_min_palm_width_is_proposed_from_profile_rest_hands():
+    """Pincements paume de face (0.7-0.8) contre mains au repos de profil (0.10-0.20)."""
+    samples = []
+    for i in range(30, 60):
+        samples.append(palm_frame(POSITIVE_LABEL, i, 0.7 + (i % 3) * 0.05))
+    for i in range(30):
+        samples.append(palm_frame("main_repos_profil", i, 0.10 + (i % 3) * 0.05))
+    p = propose_thresholds(samples, enter=0.25)["min_palm_width"]
+    assert p.p5_positives == pytest.approx(0.7)
+    assert p.p95_negatives == pytest.approx(0.2)
+    assert p.threshold == pytest.approx(0.45)
+    assert p.margin == pytest.approx(0.5)
+    learned = thresholds_from_proposals({"min_palm_width": p}, replace(T, min_palm_width=0.4))
+    assert learned.min_palm_width == pytest.approx(0.45)
+
+
+def test_palm_proposal_without_separation_keeps_the_provisional_value():
+    overlapping = propose_threshold([0.3, 0.5, 0.7], [0.4, 0.6, 0.8])
+    assert overlapping.margin < 0
+    current = replace(T, min_palm_width=0.40)
+    learned = thresholds_from_proposals({"min_palm_width": overlapping}, current)
+    assert learned.min_palm_width == 0.40
 
 
 def test_toward_camera_is_out_of_vocabulary():

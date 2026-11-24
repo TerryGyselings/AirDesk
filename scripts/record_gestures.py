@@ -31,12 +31,10 @@ import cv2
 from airdesk.capture import Camera
 from airdesk.config import PROJECT_ROOT, apply_cli_overrides, load_config
 from airdesk.interpretation.features import (
-    MIDDLE_MCP,
     WRIST,
     compute_features,
-    distance_2d,
     normalize_landmarks,
-    to_homogeneous,
+    wrist_speed,
 )
 from airdesk.perception import HandTracker
 from airdesk.session_log import HAND_COLUMNS, build_metadata, hand_columns
@@ -46,8 +44,9 @@ DATASET_DIR = PROJECT_ROOT / "data" / "datasets"
 WINDOW_NAME = "AirDesk - enregistrement (q ou Echap pour arreter)"
 METRONOME_FLASH_MS = 300  # durée d'affichage de « PINCE ! » au début de chaque seconde
 # Version du protocole, notée dans le JSON : 2 = consigne du pincement maintenu précisée
-# (doigts collés, petits mouvements) et position / vitesse du poignet enregistrées.
-PROTOCOL_VERSION = 2
+# (doigts collés, petits mouvements) et position / vitesse du poignet enregistrées ;
+# 3 = séquence négative « main_repos_profil » et colonnes palm_width / palm_facing.
+PROTOCOL_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -74,6 +73,11 @@ SEQUENCES = [
     Sequence("main_relachee", ("Main relachee, naturelle,", "comme au repos devant l'ecran.")),
     Sequence("parasites", ("Gestes libres SANS pincer :", "se gratter, montrer, saluer...")),
     Sequence(
+        "main_repos_profil",
+        ("Main detendue DE COTE (profil),", "pouce contre l'index, comme au repos.",
+         "Bouge un peu, sans montrer la paume."),
+    ),
+    Sequence(
         "pincement_vers_camera",
         ("Index pointe VERS la camera :", "pince a chaque PINCE !"),
         metronome=True,
@@ -95,25 +99,16 @@ def dataset_columns() -> list[str]:
     return columns
 
 
-def wrist_speed(hand, previous, timestamp_ms: int, aspect: float) -> float | None:
-    """Vitesse du poignet en tailles de main par seconde, depuis l'image précédente.
+def speed_since(hand, previous, timestamp_ms: int, aspect: float) -> float | None:
+    """Vitesse du poignet depuis l'image précédente (tailles de main par seconde).
 
     `previous` : (timestamp_ms, landmarks) de l'image précédente avec main, ou None.
-    Unités homogènes (x multiplié par aspect) et division par la taille de main : la valeur
-    ne dépend ni du format de l'image ni de la distance à la caméra.
     """
     if previous is None:
         return None
     previous_ms, previous_landmarks = previous
     dt_s = (timestamp_ms - previous_ms) / 1000.0
-    if dt_s <= 0:
-        return None
-    now = to_homogeneous(hand.landmarks, aspect)
-    before = to_homogeneous(previous_landmarks, aspect)
-    hand_size = distance_2d(now[WRIST], now[MIDDLE_MCP])
-    if hand_size < 1e-6:
-        return None
-    return distance_2d(now[WRIST], before[WRIST]) / dt_s / hand_size
+    return wrist_speed(hand.landmarks, previous_landmarks, dt_s, aspect)
 
 
 def dataset_row(
@@ -208,7 +203,7 @@ def run_phase(frames, tracker, cfg, aspect, sequence, number, total, duration_ms
             features = compute_features(
                 hand.landmarks, cfg.fingers.folded_below, cfg.fingers.folded_below_3d, aspect
             )
-            speed = wrist_speed(hand, previous, frame.timestamp_ms, aspect)
+            speed = speed_since(hand, previous, frame.timestamp_ms, aspect)
             previous = (frame.timestamp_ms, hand.landmarks)
         else:
             previous = None  # après une perte de la main, la vitesse repart de zéro

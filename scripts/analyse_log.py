@@ -12,15 +12,20 @@ le log : ce sont ceux qui étaient en vigueur pendant la mesure, pas ceux d'aujo
 from __future__ import annotations
 
 import argparse
+import statistics
 import sys
 from pathlib import Path
 
 from airdesk.config import load_config
 from airdesk.log_analysis import (
+    IMMOBILE_MIN_MS,
+    IMMOBILE_SPEED,
+    JITTER_GOAL_PX,
     pinch_durations,
     pinch_thresholds,
     read_log,
     read_metadata,
+    still_periods,
     summarize,
     text_histogram,
 )
@@ -38,6 +43,9 @@ def latest_log(folder: Path) -> Path | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyse d'un log AirDesk (airdesk --log).")
     parser.add_argument("csv", type=Path, nargs="?", help="fichier CSV (défaut : le plus récent)")
+    parser.add_argument("--immobile-speed", type=float, default=IMMOBILE_SPEED,
+                        help="vitesse du poignet sous laquelle la main est jugée immobile "
+                             f"(tailles de main / s, défaut {IMMOBILE_SPEED})")
     args = parser.parse_args()
 
     csv_path = args.csv
@@ -102,6 +110,43 @@ def main() -> None:
         "les glisser bien après.\nLa durée de mesure dépend de la cadence : à 30 i/s, "
         "précision d'environ 33 ms."
     )
+
+    print_jitter(rows, args.immobile_speed)
+
+
+def print_jitter(rows, max_speed: float) -> None:
+    """Tremblement du curseur pendant les périodes où la main est immobile."""
+    print(f"\nTremblement du curseur, main immobile (poignet < {max_speed:g} taille de main/s "
+          f"pendant >= {IMMOBILE_MIN_MS / 1000:g} s) :")
+    has_cursor = False
+    for row in rows:
+        if row.cursor is not None:
+            has_cursor = True
+            break
+    if not has_cursor:
+        print("  Pas de position de curseur dans ce log (pointage relatif, ou log enregistré "
+              "avant cette mesure).")
+        return
+    periods = still_periods(rows, max_speed)
+    if not periods:
+        print("  Aucune période immobile assez longue : garder la main immobile 2-3 s, "
+              "plusieurs fois, pendant l'enregistrement.")
+        return
+    print(f"  {'début (ms)':>10} | {'durée':>7} | {'images':>6} | {'é.-t. x':>8} | {'é.-t. y':>8}")
+    jitters = []
+    for p in periods:
+        jitters.append(p.jitter)
+        print(f"  {p.start_ms:>10} | {p.duration_ms:>4} ms | {p.frames:>6} | {p.std_x:6.2f} px |"
+              f" {p.std_y:6.2f} px")
+    median = statistics.median(jitters)
+    worst = max(jitters)
+    verdict = "OK" if worst < JITTER_GOAL_PX else "AU-DESSUS de l'objectif"
+    print(f"  {len(periods)} période(s) ; tremblement (plus grand écart-type x/y) : médiane "
+          f"{median:.2f} px, maximum {worst:.2f} px -> objectif < {JITTER_GOAL_PX:g} px : "
+          f"{verdict}")
+    if worst >= JITTER_GOAL_PX:
+        print("  Piste : baisser filter.absolute.min_cutoff dans gestures.yaml (plus de lissage "
+              "à basse vitesse), puis vérifier que le curseur ne traîne pas.")
 
 
 if __name__ == "__main__":

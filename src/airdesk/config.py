@@ -10,7 +10,7 @@ Trois niveaux, du plus faible au plus fort :
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -31,8 +31,8 @@ class PinchConfig:
     enter: float = 0.25
     exit: float = 0.40
     click_max_ms: float = 300
-    # Règle anti-poing (voir interpretation/pinch_rules.py). PAS ENCORE utilisée par la
-    # machine à états : décision après mesures. "A" = règle actuelle.
+    # Règle anti-poing (voir interpretation/pinch_rules.py). Valeurs par défaut du code =
+    # comportement d'origine ; les valeurs en service sont dans config/gestures.yaml.
     rule: str = "A"
     min_index_extension: float = 1.0
     min_index_extension_3d: float = 1.0
@@ -43,6 +43,9 @@ class PinchConfig:
     measure: str = "ratio"
     # Sortir aussi du pincement quand les autres doigts se replient (règles C, D...).
     exit_on_fold: bool = False
+    # Entrée en pincement seulement si la paume fait face à la caméra (palm_width).
+    require_palm_facing: bool = False
+    min_palm_width: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -62,8 +65,25 @@ class FingersConfig:
 
 
 @dataclass(frozen=True)
+class ZoneConfig:
+    """Zone d'interaction : partie de l'image (fractions 0 à 1) projetée sur tout l'écran."""
+
+    left: float = 0.15
+    right: float = 0.85
+    top: float = 0.15
+    bottom: float = 0.75
+
+
+@dataclass(frozen=True)
 class PointerConfig:
-    pixels_per_frame_width: float = 2400
+    # "absolute" : la zone d'interaction de l'image correspond à l'écran entier.
+    # "relative" : comme un pavé tactile, la main déplace le curseur (gain ci-dessous).
+    mode: str = "absolute"
+    zone: ZoneConfig = field(default_factory=ZoneConfig)
+    # Écran couvert en pointage absolu : "primary" (principal) ou "all" (rectangle
+    # englobant de tous les écrans).
+    screen: str = "primary"
+    pixels_per_frame_width: float = 2400  # gain du mode relatif
     landmark: int = 9
 
 
@@ -72,6 +92,33 @@ class FilterConfig:
     min_cutoff: float = 1.0
     beta: float = 8.0
     d_cutoff: float = 1.0
+
+
+def default_absolute_filter() -> FilterConfig:
+    """Coupure plus basse en absolu, où le bruit de la main est plus amplifié."""
+    return FilterConfig(min_cutoff=0.5)
+
+
+@dataclass(frozen=True)
+class FilterModes:
+    """Réglages du filtre 1€ pour chaque mode de pointage (le bruit n'y est pas amplifié
+    pareil : voir config/gestures.yaml)."""
+
+    absolute: FilterConfig = field(default_factory=default_absolute_filter)
+    relative: FilterConfig = field(default_factory=FilterConfig)
+
+    def for_mode(self, mode: str) -> FilterConfig:
+        if mode == "absolute":
+            return self.absolute
+        return self.relative
+
+
+@dataclass(frozen=True)
+class HandConfig:
+    """Choix de la main suivie quand deux mains sont visibles."""
+
+    preferred: str = "right"  # "right", "left" ou "any" (côté de l'utilisateur)
+    max_jump: float = 1.5  # saut maximal du poignet entre deux images, en tailles de main
 
 
 @dataclass(frozen=True)
@@ -89,10 +136,11 @@ class Config:
     engagement: EngagementConfig
     pinch: PinchConfig
     pointer: PointerConfig
-    filter: FilterConfig
+    filter: FilterModes
     camera: CameraConfig
     fingers: FingersConfig
     quality: QualityConfig
+    hand: HandConfig
 
 
 def read_yaml(path: Path) -> dict:
@@ -133,15 +181,37 @@ def load_config(path: Path | None = None, local_path: Path | None = LOCAL_CONFIG
     if local_path is not None:
         raw = merge_settings(raw, read_yaml(local_path))
 
+    # Sous-sections imbriquées : pointer.zone et filter.absolute / filter.relative.
+    pointer_raw = dict(raw.get("pointer", {}))
+    if "zone" in pointer_raw:
+        pointer_raw["zone"] = ZoneConfig(**pointer_raw["zone"])
+
     return Config(
         engagement=EngagementConfig(**raw.get("engagement", {})),
         pinch=PinchConfig(**raw.get("pinch", {})),
-        pointer=PointerConfig(**raw.get("pointer", {})),
-        filter=FilterConfig(**raw.get("filter", {})),
+        pointer=PointerConfig(**pointer_raw),
+        filter=filter_modes(raw.get("filter", {})),
         camera=CameraConfig(**raw.get("camera", {})),
         fingers=FingersConfig(**raw.get("fingers", {})),
         quality=QualityConfig(**raw.get("quality", {})),
+        hand=HandConfig(**raw.get("hand", {})),
     )
+
+
+def filter_modes(raw: dict) -> FilterModes:
+    """Section `filter` : réglages par mode, ou ancien format à plat (appliqué aux deux)."""
+    if "absolute" in raw or "relative" in raw:
+        absolute = FilterModes().absolute
+        relative = FilterModes().relative
+        if "absolute" in raw:
+            absolute = FilterConfig(**raw["absolute"])
+        if "relative" in raw:
+            relative = FilterConfig(**raw["relative"])
+        return FilterModes(absolute=absolute, relative=relative)
+    if raw:
+        same = FilterConfig(**raw)
+        return FilterModes(absolute=same, relative=same)
+    return FilterModes()
 
 
 def apply_cli_overrides(

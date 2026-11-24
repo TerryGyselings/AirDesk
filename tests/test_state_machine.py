@@ -1,10 +1,19 @@
-from airdesk.config import EngagementConfig, FingersConfig, PinchConfig, load_config
+import pytest
+
+from airdesk.config import (
+    EngagementConfig,
+    FingersConfig,
+    PinchConfig,
+    PointerConfig,
+    load_config,
+)
 from airdesk.interpretation.features import HandFeatures
 from airdesk.interpretation.pinch_rules import MEASURES, RULES
 from airdesk.interpretation.state_machine import (
     Click,
     GestureStateMachine,
     Move,
+    MoveTo,
     Press,
     Release,
     State,
@@ -12,11 +21,15 @@ from airdesk.interpretation.state_machine import (
 
 
 def features(
-    pinch_ratio: float, extended_fingers: int, extension: float, pinch_seg: float | None = None
+    pinch_ratio: float,
+    extended_fingers: int,
+    extension: float,
+    pinch_seg: float | None = None,
+    palm_width: float = 0.8,
 ) -> HandFeatures:
     """Descripteurs simplifiés : même extension (bout -> paume) pour les quatre doigts.
 
-    `pinch_seg` vaut pinch_ratio par défaut.
+    `pinch_seg` vaut pinch_ratio par défaut ; `palm_width` 0.8 = paume de face.
     """
     if pinch_seg is None:
         pinch_seg = pinch_ratio
@@ -35,6 +48,8 @@ def features(
         folded_fingers_3d=folded,
         pinch_seg=pinch_seg,
         pinch_seg_68=pinch_seg,
+        palm_width=palm_width,
+        palm_facing=palm_width / 0.8,
     )
 
 
@@ -248,6 +263,95 @@ def test_measure_seg78_is_used():
     t = activate(with_seg)
     with_seg.update(t, thumb_below_tip, P)
     assert with_seg.state == State.PINCHING
+
+
+# --- Main au repos de profil ---------------------------------------------------------------------
+
+# Main détendue, de côté : pouce contre l'index (pinch_ratio petit), autres doigts à moitié
+# ouverts (extension 1.0, au-dessus de folded_below), mais paume étroite (vue de profil).
+REST_PROFILE = features(pinch_ratio=0.10, extended_fingers=1, extension=1.0, palm_width=0.15)
+
+
+def machine_d_palm(require_palm_facing):
+    pinch = PinchConfig(rule="D", release_grace_ms=66, require_palm_facing=require_palm_facing,
+                        min_palm_width=0.40)
+    return GestureStateMachine(ENGAGEMENT, pinch, FINGERS)
+
+
+def test_rest_hand_in_profile_fools_rule_d_alone():
+    """Le défaut constaté en usage réel : la règle D seule accepte la main de profil."""
+    m = machine_d_palm(require_palm_facing=False)
+    t = activate(m)
+    t, events = feed(m, t, REST_PROFILE, 600)
+    assert Press() in events
+
+
+def test_palm_condition_rejects_the_rest_hand_in_profile():
+    m = machine_d_palm(require_palm_facing=True)
+    t = activate(m)
+    t, events = feed(m, t, REST_PROFILE, 600)
+    assert events == []
+    assert m.state == State.ACTIVE
+
+
+def test_palm_condition_keeps_the_ok_gesture():
+    """Pincement « OK », paume de face (0.8) : toujours reconnu."""
+    m = machine_d_palm(require_palm_facing=True)
+    t = activate(m)
+    m.update(t, PINCH, P)
+    assert m.state == State.PINCHING
+
+
+# --- Pointage absolu ---------------------------------------------------------------------------
+
+
+def machine_absolute():
+    return GestureStateMachine(ENGAGEMENT, PinchConfig(), pointer=PointerConfig(mode="absolute"))
+
+
+def test_absolute_mode_emits_screen_positions():
+    """Zone par défaut 15 %..85 % en x, 15 %..75 % en y : (0.50, 0.45) = milieu de l'écran."""
+    m = machine_absolute()
+    t = activate(m)
+    events = m.update(t, OPEN, (0.50, 0.45))
+    assert events == [MoveTo(pytest.approx(0.5), pytest.approx(0.5))]
+    assert m.update(t + 33, OPEN, (0.50, 0.45)) == []  # même position : rien à envoyer
+    events = m.update(t + 66, OPEN, (0.95, 0.05))  # hors zone : collé au coin haut droit
+    assert events == [MoveTo(1.0, 0.0)]
+
+
+def test_absolute_cursor_is_frozen_during_a_short_pinch():
+    m = machine_absolute()
+    t = activate(m)
+    m.update(t, OPEN, (0.50, 0.45))
+    m.update(t + 33, PINCH, (0.50, 0.45))
+    assert m.state == State.PINCHING
+    events = m.update(t + 66, PINCH, (0.60, 0.45))  # la main bouge pendant le pincement
+    assert events == []  # le curseur ne suit pas : le clic tombe là où on visait
+    events = m.update(t + 99, OPEN, (0.60, 0.45))
+    assert Click() in events
+    events = m.update(t + 132, OPEN, (0.60, 0.45))  # de nouveau actif : le curseur rejoint la main
+    assert len(events) == 1
+    assert isinstance(events[0], MoveTo)
+
+
+def test_absolute_cursor_follows_during_a_drag():
+    m = machine_absolute()
+    t = activate(m)
+    m.update(t, PINCH, (0.50, 0.45))
+    m.update(t + 400, PINCH, (0.50, 0.45))
+    assert m.state == State.DRAGGING
+    events = m.update(t + 433, PINCH, (0.60, 0.45))
+    assert len(events) == 1
+    assert isinstance(events[0], MoveTo)
+
+
+def test_without_pointer_config_the_machine_stays_relative():
+    """Comportement d'origine : sans PointerConfig, Move (relatif)."""
+    m = new_machine()
+    t = activate(m)
+    events = m.update(t, OPEN, (0.6, 0.5))
+    assert isinstance(events[0], Move)
 
 
 def test_project_configuration_builds_a_machine():
