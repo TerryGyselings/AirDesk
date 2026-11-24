@@ -28,10 +28,12 @@ from airdesk.gesture_analysis import (
     NEGATIVE_LABELS,
     OUT_OF_VOCABULARY_LABELS,
     POSITIVE_LABEL,
+    PROFILE_LABEL,
     EpisodeMetrics,
     EpisodeSettings,
     Sample,
     SweepRow,
+    best_separation,
     confusion,
     count_episodes,
     count_sequences,
@@ -39,6 +41,7 @@ from airdesk.gesture_analysis import (
     detection_rate,
     episode_metrics,
     frame_samples,
+    profile_separations,
     propose_hand_size_ratio,
     propose_threshold,
     propose_thresholds,
@@ -282,6 +285,44 @@ def test_palm_proposal_without_separation_keeps_the_provisional_value():
     current = replace(T, min_palm_width=0.40)
     learned = thresholds_from_proposals({"min_palm_width": overlapping}, current)
     assert learned.min_palm_width == 0.40
+
+
+def test_best_separation_finds_the_right_direction():
+    """palm_width : pincement plus LARGE ; pinch_ratio : pincement plus PETIT."""
+    wide = best_separation("palm_width", [0.6, 0.7, 0.8], [0.1, 0.2, 0.3])
+    assert wide.higher_is_pinch
+    assert wide.proposal.threshold == pytest.approx(0.45)
+    assert wide.proposal.margin == pytest.approx(0.3)
+    assert wide.proposal.youden_j == 1.0
+    small = best_separation("pinch_ratio", [0.05, 0.10, 0.15], [0.40, 0.50, 0.60])
+    assert not small.higher_is_pinch
+    assert small.proposal.threshold == pytest.approx(0.275)  # entre 0.15 et 0.40
+    assert small.proposal.margin == pytest.approx(0.25)
+    assert small.proposal.youden_threshold == pytest.approx(0.275)
+    assert small.proposal.youden_j == 1.0
+
+
+def test_profile_comparison_needs_the_label(train):
+    """Anciens fichiers (protocole v1) : pas de main au repos de profil, pas de comparaison."""
+    assert profile_separations(train, POSITIVE_LABEL) == []
+
+
+def test_profile_comparison_ranks_descriptors():
+    samples = []
+    for i in range(30, 60):  # pincement maintenu : paume large, poignet haut
+        s = palm_frame(POSITIVE_LABEL, i, 0.7)
+        s.wrist_y = 0.5
+        samples.append(s)
+    for i in range(30):  # main au repos de profil : paume étroite, poignet au même niveau
+        s = palm_frame(PROFILE_LABEL, i, 0.15)
+        s.wrist_y = 0.5 + (i % 2) * 0.01
+        samples.append(s)
+    ranking = profile_separations(samples, POSITIVE_LABEL)
+    assert ranking[0].descriptor == "palm_width"  # sépare parfaitement : en tête
+    by_name = {}
+    for sep in ranking:
+        by_name[sep.descriptor] = sep
+    assert by_name["wrist_y"].proposal.youden_j < 1.0
 
 
 def test_toward_camera_is_out_of_vocabulary():

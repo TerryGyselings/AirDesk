@@ -3,12 +3,16 @@
 Elle répond au problème du « Midas touch » (Jacob, 1991) : la main bouge tout le temps,
 donc rien ne doit se déclencher tant que l'utilisateur ne l'a pas clairement demandé.
 
-    VEILLE ──(main ouverte maintenue hold_ms)──▶ ACTIF
-    ACTIF ──(pincement)──▶ PINCEMENT
+    VEILLE ──(main ouverte maintenue hold_ms, dans la zone)──▶ ACTIF
+    ACTIF ──(pincement, dans la zone)──▶ PINCEMENT
     PINCEMENT ──(relâché avant click_max_ms)──▶ ACTIF      + Click
     PINCEMENT ──(maintenu après click_max_ms)──▶ GLISSER    + Press
     GLISSER ──(relâché)──▶ ACTIF                            + Release
     n'importe quel état ──(main perdue > lost_timeout_ms)──▶ VEILLE
+    n'importe quel état ──(main sous la zone > rest_ms)──▶ VEILLE  (+ Release si glisser)
+
+« Main baissée = veille » : poser la main, c'est arrêter de piloter. Ces règles de zone sont
+activées par gestures.yaml (activate_in_zone, only_in_zone, rest_ms).
 
 Cette classe ne connaît ni la caméra, ni la souris : elle reçoit des mesures et renvoie
 des événements. C'est ce qui permet de la tester sans webcam (voir tests/).
@@ -22,7 +26,7 @@ from enum import Enum
 from airdesk.config import EngagementConfig, FingersConfig, PinchConfig, PointerConfig
 from airdesk.interpretation.features import HandFeatures
 from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_measure
-from airdesk.interpretation.pointing import zone_to_screen
+from airdesk.interpretation.pointing import below_zone, in_zone, zone_to_screen
 
 
 class State(Enum):
@@ -113,6 +117,7 @@ class GestureStateMachine:
         self._last_seen_ms: float | None = None
         self._prev_pointer: tuple[float, float] | None = None
         self._last_target: tuple[float, float] | None = None  # dernier MoveTo émis
+        self._below_since_ms: float | None = None  # depuis quand la main est sous la zone
 
     def update(
         self,
@@ -135,23 +140,47 @@ class GestureStateMachine:
                     events.append(Release())
                 self.state = State.IDLE
                 self._pinch_detector.reset()
+                self._below_since_ms = None
             return events
 
         self._last_seen_ms = t_ms
 
-        # --- Veille : on attend une main ouverte maintenue ---
+        zone = self.pointer.zone
+        inside = in_zone(pointer[0], pointer[1], zone)
+
+        # --- Veille : on attend une main ouverte maintenue (dans la zone, si demandé) ---
         if self.state == State.IDLE:
-            if features.open_palm:
+            arming = features.open_palm
+            if self.engagement.activate_in_zone and not inside:
+                arming = False  # main ouverte posée en bas, hors zone : ce n'est pas un appel
+            if arming:
                 if self._arm_start_ms is None:
                     self._arm_start_ms = t_ms
                 elif t_ms - self._arm_start_ms >= self.engagement.hold_ms:
                     self.state = State.ACTIVE
                     self._arm_start_ms = None
+                    self._below_since_ms = None
                     self._prev_pointer = pointer  # pas de saut du curseur à l'activation
                     self._pinch_detector.reset()
             else:
                 self._arm_start_ms = None
             return events
+
+        # --- Main baissée sous la zone pendant rest_ms : retour en veille ---
+        if self.engagement.rest_ms > 0 and below_zone(pointer[1], zone):
+            if self._below_since_ms is None:
+                self._below_since_ms = t_ms
+            elif t_ms - self._below_since_ms >= self.engagement.rest_ms:
+                if self.state == State.DRAGGING:
+                    events.append(Release())  # on ne laisse pas le bouton enfoncé
+                # Un pincement court en cours est simplement annulé : pas de clic.
+                self.state = State.IDLE
+                self._below_since_ms = None
+                self._arm_start_ms = None
+                self._pinch_detector.reset()
+                return events
+        else:
+            self._below_since_ms = None
 
         # --- Déplacement du curseur (sauf pendant un pincement court, pour un clic précis) ---
         if self.state != State.PINCHING:
@@ -168,13 +197,18 @@ class GestureStateMachine:
         self._prev_pointer = pointer
 
         # --- Pincement : entrée / sortie confiées à PinchHysteresis ---
-        pinch_event = self._pinch_detector.update(
-            t_ms,
-            pinch_measure(features, self.pinch.measure),
-            features.finger_extensions,
-            features.finger_extensions_3d,
-            features.palm_width,
-        )
+        # Hors zone, un pincement ne peut pas COMMENCER (main baissée, au repos) ; un pincement
+        # déjà commencé dans la zone continue, pour ne pas lâcher un glisser vers un bord.
+        pinch_event = None
+        may_start = inside or not self.pinch.only_in_zone
+        if self._pinch_detector.pinched or may_start:
+            pinch_event = self._pinch_detector.update(
+                t_ms,
+                pinch_measure(features, self.pinch.measure),
+                features.finger_extensions,
+                features.finger_extensions_3d,
+                features.palm_width,
+            )
 
         if self.state == State.ACTIVE:
             if pinch_event == "start":

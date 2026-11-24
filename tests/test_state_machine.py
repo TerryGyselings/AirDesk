@@ -310,12 +310,12 @@ def machine_absolute():
 
 
 def test_absolute_mode_emits_screen_positions():
-    """Zone par défaut 15 %..85 % en x, 15 %..75 % en y : (0.50, 0.45) = milieu de l'écran."""
+    """Zone par défaut 15 %..85 % en x, 20 %..80 % en y : (0.50, 0.50) = milieu de l'écran."""
     m = machine_absolute()
     t = activate(m)
-    events = m.update(t, OPEN, (0.50, 0.45))
+    events = m.update(t, OPEN, (0.50, 0.50))
     assert events == [MoveTo(pytest.approx(0.5), pytest.approx(0.5))]
-    assert m.update(t + 33, OPEN, (0.50, 0.45)) == []  # même position : rien à envoyer
+    assert m.update(t + 33, OPEN, (0.50, 0.50)) == []  # même position : rien à envoyer
     events = m.update(t + 66, OPEN, (0.95, 0.05))  # hors zone : collé au coin haut droit
     assert events == [MoveTo(1.0, 0.0)]
 
@@ -352,6 +352,100 @@ def test_without_pointer_config_the_machine_stays_relative():
     t = activate(m)
     events = m.update(t, OPEN, (0.6, 0.5))
     assert isinstance(events[0], Move)
+
+
+# --- Main baissée = veille ----------------------------------------------------------------------
+# Zone par défaut : x 0.15..0.85, y 0.20..0.80. IN = dans la zone, BELOW = sous la zone.
+
+IN = (0.50, 0.50)
+BELOW = (0.50, 0.90)
+
+
+def machine_zone(click_max_ms=300):
+    engagement = EngagementConfig(hold_ms=300, lost_timeout_ms=1000, rest_ms=500,
+                                  activate_in_zone=True)
+    pinch = PinchConfig(only_in_zone=True, click_max_ms=click_max_ms)
+    return GestureStateMachine(engagement, pinch, pointer=PointerConfig(mode="absolute"))
+
+
+def activate_at(m, position):
+    t = 0
+    while t <= 330:
+        m.update(t, OPEN, position)
+        t += 33
+    return t
+
+
+def test_open_hand_outside_the_zone_does_not_activate():
+    m = machine_zone()
+    activate_at(m, BELOW)
+    assert m.state == State.IDLE
+    activate_at(m, IN)
+    assert m.state == State.ACTIVE
+
+
+def test_pinch_cannot_start_outside_the_zone():
+    m = machine_zone()
+    t = activate_at(m, IN)
+    m.update(t, PINCH, (0.50, 0.85))  # main baissée (sous la zone), pouce contre index
+    assert m.state == State.ACTIVE
+    m.update(t + 33, PINCH, IN)  # dans la zone : le pincement commence
+    assert m.state == State.PINCHING
+
+
+def test_pinch_started_in_the_zone_continues_outside():
+    """Glisser une fenêtre vers le bord : on peut sortir de la zone sans lâcher."""
+    m = machine_zone()
+    t = activate_at(m, IN)
+    m.update(t, PINCH, IN)
+    m.update(t + 400, PINCH, IN)
+    assert m.state == State.DRAGGING
+    events = m.update(t + 433, PINCH, (0.95, 0.50))  # hors zone, à droite
+    assert m.state == State.DRAGGING
+    assert Release() not in events
+
+
+def test_hand_lowered_for_rest_ms_returns_to_idle_and_releases_the_drag():
+    m = machine_zone()
+    t = activate_at(m, IN)
+    m.update(t, PINCH, IN)
+    m.update(t + 400, PINCH, IN)
+    assert m.state == State.DRAGGING
+    t, events = feed_at(m, t + 433, PINCH, BELOW, 300)  # 300 ms sous la zone : on glisse encore
+    assert m.state == State.DRAGGING
+    assert Release() not in events
+    t, events = feed_at(m, t, PINCH, BELOW, 300)  # au-delà de 500 ms : veille
+    assert m.state == State.IDLE
+    assert events.count(Release()) == 1
+
+
+def test_short_pinch_is_cancelled_without_click_when_the_hand_is_lowered():
+    # click_max_ms plus long que rest_ms : sinon le pincement deviendrait d'abord un glisser.
+    m = machine_zone(click_max_ms=1000)
+    t = activate_at(m, IN)
+    m.update(t, PINCH, IN)
+    assert m.state == State.PINCHING
+    t, events = feed_at(m, t + 33, HALF, BELOW, 600)  # descend en gardant un demi-pincement
+    assert m.state == State.IDLE
+    assert Click() not in events
+    assert Press() not in events
+
+
+def test_lowered_open_hand_does_not_reactivate():
+    """Sans activate_in_zone, une main ouverte posée en bas se réactiverait aussitôt."""
+    m = machine_zone()
+    t = activate_at(m, IN)
+    t, _ = feed_at(m, t, OPEN, BELOW, 2000)
+    assert m.state == State.IDLE
+
+
+def feed_at(m, t, hand, position, duration_ms):
+    events = []
+    end = t + duration_ms
+    while t < end:
+        events += m.update(t, hand, position)
+        t += 33
+    return t, events
 
 
 def test_project_configuration_builds_a_machine():

@@ -67,20 +67,35 @@ def ensure_model(path: Path = DEFAULT_MODEL_PATH) -> Path:
     return path
 
 
+def create_landmarker(model: Path, num_hands: int):
+    options = vision.HandLandmarkerOptions(
+        base_options=mp_tasks.BaseOptions(model_asset_path=str(model)),
+        running_mode=vision.RunningMode.VIDEO,
+        num_hands=num_hands,
+        min_hand_detection_confidence=0.5,
+        min_hand_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    return vision.HandLandmarker.create_from_options(options)
+
+
 class HandTracker:
-    """Détecte au plus `max_hands` mains par image."""
+    """Détecte au plus `max_hands` mains par image (1 ou 2).
+
+    Coût : MediaPipe ne suit une main d'une image à l'autre qu'une fois qu'il a trouvé TOUTES
+    les mains demandées ; sinon il relance à chaque image la détection de paume, l'étape
+    coûteuse. Avec 2 mains demandées et une seule visible : 19 ms par image au lieu de 9
+    (mesuré sur les logs du 2026-11-24). `num_hands` étant fixé à la création, on crée deux
+    modèles (1 et 2 mains) et `detect(..., max_hands=...)` choisit à chaque image : 2 mains
+    seulement quand il faut choisir la main pilote, 1 ensuite.
+    """
 
     def __init__(self, model_path: Path | None = None, max_hands: int = 1):
         model = ensure_model(model_path or DEFAULT_MODEL_PATH)
-        options = vision.HandLandmarkerOptions(
-            base_options=mp_tasks.BaseOptions(model_asset_path=str(model)),
-            running_mode=vision.RunningMode.VIDEO,
-            num_hands=max_hands,
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        self._landmarker = vision.HandLandmarker.create_from_options(options)
+        self.max_hands = max_hands
+        self._landmarkers = {1: create_landmarker(model, 1)}
+        if max_hands >= 2:
+            self._landmarkers[2] = create_landmarker(model, 2)
 
     def __enter__(self) -> HandTracker:
         return self
@@ -89,12 +104,19 @@ class HandTracker:
         self.close()
 
     def close(self) -> None:
-        self._landmarker.close()
+        for landmarker in self._landmarkers.values():
+            landmarker.close()
 
-    def detect(self, rgb, timestamp_ms: int) -> list[Hand]:
-        """Renvoie les mains présentes dans l'image RGB (liste vide si aucune)."""
+    def detect(self, rgb, timestamp_ms: int, max_hands: int | None = None) -> list[Hand]:
+        """Renvoie les mains présentes dans l'image RGB (liste vide si aucune).
+
+        `max_hands` : 1 ou 2 pour cette image (par défaut, celui du constructeur). Chaque
+        modèle reçoit des horodatages croissants, comme l'exige le mode VIDEO.
+        """
+        if max_hands is None or max_hands not in self._landmarkers:
+            max_hands = self.max_hands if self.max_hands in self._landmarkers else 1
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        result = self._landmarker.detect_for_video(image, timestamp_ms)
+        result = self._landmarkers[max_hands].detect_for_video(image, timestamp_ms)
 
         hands: list[Hand] = []
         for i in range(len(result.hand_landmarks)):

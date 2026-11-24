@@ -26,6 +26,15 @@ from airdesk.session_log import SessionLog, build_metadata
 from airdesk.ui import draw_debug
 
 WINDOW_NAME = "AirDesk - debug (q ou Echap pour quitter)"
+SLOW_CAMERA_FPS = 25
+
+
+def warn_if_slow_camera(fps: float) -> None:
+    """Prévient si la caméra est lente : souvent le manque de lumière (pose plus longue)."""
+    if fps < SLOW_CAMERA_FPS:
+        print(f"  ATTENTION : la caméra ne donne que {fps:.1f} images/s (< {SLOW_CAMERA_FPS}). "
+              "Peu de lumière ? Éclairer la pièce : la webcam allonge son temps de pose quand "
+              "il fait sombre, et le curseur devient moins fluide.")
 
 
 def hand_candidate(hand, features, aspect: float) -> HandCandidate:
@@ -69,6 +78,7 @@ def run(
     fps = 0.0
     last_frame_time = time.perf_counter()
     previous_hand = None  # (timestamp_ms, landmarks) de la main suivie, pour sa vitesse
+    pilot_lost = True  # au départ, il faut chercher la main pilote
 
     print(f"Ouverture de la caméra {camera_cfg.index} (quelques secondes)...")
     forced_backend = None if camera_cfg.backend == "auto" else camera_cfg.backend
@@ -84,6 +94,7 @@ def run(
             f"Caméra {camera_cfg.index} : backend {info.backend.upper()}, "
             f"{info.width}x{info.height} {info.pixel_format}, {info.fps:.1f} images/s mesurées"
         )
+        warn_if_slow_camera(info.fps)
 
         # Sans --log, nullcontext() est un « with » qui ne fait rien et donne None.
         if log:
@@ -104,8 +115,13 @@ def run(
                 frame_height, frame_width = frame.bgr.shape[:2]
                 aspect = frame_width / frame_height
 
-                # 1) Toutes les mains, leurs descripteurs, puis le choix de la main suivie.
-                hands = tracker.detect(frame.rgb, frame.timestamp_ms)
+                # 1) Les mains, leurs descripteurs, puis le rôle de chacune.
+                # 2 mains à chercher seulement quand il faut trouver la main pilote (veille, ou
+                # main pilote perdue à l'image précédente) : sinon MediaPipe relance à chaque
+                # image la détection de paume, coûteuse (19 ms au lieu de 9).
+                idle = machine.state == State.IDLE
+                search_two = idle or pilot_lost or cfg.hand.track_support
+                hands = tracker.detect(frame.rgb, frame.timestamp_ms, 2 if search_two else 1)
                 all_features = []
                 candidates = []
                 for hand in hands:
@@ -113,7 +129,11 @@ def run(
                                          cfg.fingers.folded_below_3d, aspect=aspect)
                     all_features.append(f)
                     candidates.append(hand_candidate(hand, f, aspect))
-                selected = selector.select(candidates, idle=machine.state == State.IDLE)
+                roles = selector.select(candidates, idle=idle)
+                selected = roles.pilot
+                # Avec le modèle 1 main, MediaPipe peut s'accrocher à l'autre main : le
+                # sélecteur la refuse, et l'image suivante cherche de nouveau 2 mains.
+                pilot_lost = selected is None
 
                 features = None
                 pointer = None
@@ -158,10 +178,10 @@ def run(
                     )
 
                 if show_preview:
-                    zone = cfg.pointer.zone if absolute else None
+                    # La zone sert aussi en mode relatif (activation, pincement, main baissée).
                     image = draw_debug(
                         frame.bgr, hands, selected, features, machine.state, fps,
-                        processing_ms, zone,
+                        processing_ms, cfg.pointer.zone, support=roles.support,
                     )
                     cv2.imshow(WINDOW_NAME, image)
                     key = cv2.waitKey(1) & 0xFF
@@ -169,3 +189,4 @@ def run(
                         break
 
     cv2.destroyAllWindows()
+

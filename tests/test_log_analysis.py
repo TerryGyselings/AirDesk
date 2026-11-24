@@ -8,6 +8,7 @@ Contenu du log d'exemple (une image toutes les 50 ms, de 0 à 1250 ms, soit 26 i
 Temps de traitement : 10 ms partout sauf 12, 11, 30 et 40 ms.
 """
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ from airdesk.log_analysis import (
     still_periods,
     summarize,
     text_histogram,
+    wrist_speed_quartiles,
 )
 from airdesk.session_log import COLUMNS, SessionLog, build_metadata, event_names
 
@@ -190,9 +192,18 @@ def row_at(t, speed, cursor, hand=True):
                wrist_speed=speed, cursor=cursor)
 
 
-def test_still_periods_measure_cursor_jitter():
-    """1,5 s de main immobile (curseur qui oscille de ±2 px en x), puis un geste rapide,
-    puis 0,5 s immobile (trop court pour compter)."""
+def still_rows(cursor_x_at, duration_s=3.0, fps=30):
+    """Main immobile pendant `duration_s` ; position x du curseur donnée par cursor_x_at(t_s)."""
+    rows = []
+    n = int(duration_s * fps)
+    for i in range(n):
+        t_ms = round(i * 1000 / fps)
+        rows.append(row_at(t_ms, 0.1, (round(cursor_x_at(t_ms / 1000)), 500)))
+    return rows
+
+
+def test_still_periods_keep_only_long_still_runs():
+    """1,5 s immobile, un geste rapide, puis 0,5 s immobile (trop court pour compter)."""
     rows = []
     t = 0
     for i in range(46):  # 0 à 1 485 ms
@@ -208,9 +219,75 @@ def test_still_periods_measure_cursor_jitter():
     assert len(periods) == 1
     p = periods[0]
     assert p.frames == 46
-    assert p.std_x == pytest.approx(2.0)  # écart-type de ±2 px
-    assert p.std_y == 0.0
-    assert p.jitter == pytest.approx(2.0)
+    assert p.drift_x == pytest.approx(2.0)  # écart-type brut de ±2 px
+    assert p.drift_y == 0.0
+    assert p.jitter(300) == pytest.approx(2.0, abs=0.3)  # bruit rapide : vu par les deux
+    assert p.jitter(1000) == pytest.approx(2.0, abs=0.3)
+
+
+def test_slow_sine_tremor_is_measured_with_the_one_second_window():
+    """Tremblement de ±3 px à 1 Hz (lent, comme après le filtre 1€) : écart-type 3/√2 ≈ 2,1 px.
+    La fenêtre de 1 s le mesure ; celle de 300 ms le prend en partie pour de la dérive."""
+    rows = still_rows(lambda t: 1000 + 3 * math.sin(2 * math.pi * 1.0 * t))
+    p = still_periods(rows)[0]
+    expected = 3 / math.sqrt(2)
+    assert p.jitter(1000) == pytest.approx(expected, rel=0.15)
+    assert p.jitter(300) < 0.5 * expected  # mesure optimiste avec la fenêtre courte
+
+
+def test_slow_drift_is_not_counted_as_tremor():
+    """Dérive régulière de 20 px/s, sans bruit : grande dérive, tremblement quasi nul."""
+    rows = still_rows(lambda t: 1000 + 20 * t)
+    p = still_periods(rows)[0]
+    assert p.drift > 10
+    assert p.jitter(300) < 0.5
+    assert p.jitter(1000) < 0.5
+
+
+def test_short_period_gives_no_value_for_the_long_window():
+    rows = still_rows(lambda t: 1000, duration_s=1.2)  # 36 images : 6 résidus sur 1 s
+    p = still_periods(rows)[0]
+    assert p.jitter(1000) is None
+    assert p.jitter(300) is not None
+
+
+def test_wrist_speed_quartiles():
+    rows = []
+    for i, speed in enumerate([0.1, 0.2, 0.3, 0.4]):
+        rows.append(row_at(i * 33, speed, None))
+    assert wrist_speed_quartiles(rows) == (0.1, pytest.approx(0.25), 0.3)
+    assert wrist_speed_quartiles([row_at(0, None, None)]) is None
+
+
+def test_click_after_the_release_grace_is_attributed_to_the_pinch():
+    """Avec release_grace_ms = 66, le clic est émis 2 images APRÈS la fin du pincement
+    mesurée sur pinch_ratio : sans fenêtre, l'issue serait « aucune »."""
+    rows = [
+        Row(0, True, 0.8, 4, "actif", [], 10.0),
+        Row(33, True, 0.1, 1, "pincement", [], 10.0),
+        Row(66, True, 0.1, 1, "pincement", [], 10.0),
+        Row(99, True, 0.6, 4, "pincement", [], 10.0),  # fin mesurée (pinch_ratio >= exit)
+        Row(132, True, 0.6, 4, "pincement", [], 10.0),
+        Row(165, True, 0.6, 4, "actif", ["click"], 10.0),  # clic confirmé 66 ms plus tard
+        Row(198, True, 0.8, 4, "actif", [], 10.0),
+    ]
+    without = pinch_durations(rows, 0.25, 0.40)
+    assert without[0].outcome == OUTCOME_NONE  # le bug constaté
+    with_window = pinch_durations(rows, 0.25, 0.40, outcome_extra_ms=66 + 33)
+    assert with_window[0].outcome == OUTCOME_CLICK
+    assert with_window[0].duration_ms == 66  # la durée, elle, ne change pas
+
+
+def test_outcome_window_stops_at_the_next_pinch():
+    rows = [
+        Row(0, True, 0.1, 1, "pincement", [], 10.0),
+        Row(33, True, 0.6, 4, "pincement", [], 10.0),  # fin du 1er
+        Row(66, True, 0.1, 1, "pincement", ["click"], 10.0),  # début du 2e (avec un clic)
+        Row(99, True, 0.6, 4, "actif", [], 10.0),
+    ]
+    pinches = pinch_durations(rows, 0.25, 0.40, outcome_extra_ms=200)
+    assert pinches[0].outcome == OUTCOME_NONE  # le clic appartient au 2e pincement
+    assert pinches[1].outcome == OUTCOME_CLICK
 
 
 def test_still_periods_need_a_hand_and_a_cursor():

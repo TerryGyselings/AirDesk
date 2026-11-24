@@ -27,6 +27,8 @@ from airdesk.gesture_analysis import (
     NEGATIVE_LABELS,
     OUT_OF_VOCABULARY_LABELS,
     POSITIVE_LABEL,
+    PROFILE_DESCRIPTORS,
+    PROFILE_LABEL,
     EpisodeSettings,
     SweepRow,
     confusion,
@@ -34,6 +36,7 @@ from airdesk.gesture_analysis import (
     count_sequences,
     detection_rate,
     labels_in_order,
+    profile_separations,
     propose_hand_size_ratio,
     propose_thresholds,
     rank,
@@ -312,6 +315,36 @@ def write_sweep_csv(path: Path, rows: list[SweepRow]) -> None:
             writer.writerow(line)
 
 
+def print_profile_comparison(samples, name: str) -> None:
+    """Quel indice sépare le mieux la main au repos de profil des vrais pincements ?"""
+    if PROFILE_LABEL not in labels_in_order(samples):
+        print(f"  ({name}) Pas de séquence {PROFILE_LABEL} : il faut une session au protocole v3 "
+              "(python scripts/record_gestures.py). min_palm_width n'est pas modifié.")
+        return
+    labels = [PROFILE_LABEL, POSITIVE_LABEL, "pincements_repetes"]
+    stats = stats_by_label(samples)
+    print(f"  ({name}) Distributions (min / P5 / médiane / P95 / max) :")
+    for descriptor in PROFILE_DESCRIPTORS:
+        print(f"    {descriptor} :")
+        for label in labels:
+            s = stats.get(label, {}).get(descriptor)
+            if s is None:
+                print(f"      {label:<22} -")
+                continue
+            print(f"      {label:<22} {s.minimum:6.2f} {s.p5:6.2f} {s.median:6.2f} {s.p95:6.2f} "
+                  f"{s.maximum:6.2f}  (n={s.n})")
+    for pinch_label in (POSITIVE_LABEL, "pincements_repetes"):
+        print(f"\n  ({name}) Séparation {pinch_label} / {PROFILE_LABEL}, du meilleur indice au "
+              "moins bon (Youden J ; marge = écart entre P5/P95 des deux groupes) :")
+        for sep in profile_separations(samples, pinch_label):
+            p = sep.proposal
+            sense = ">" if sep.higher_is_pinch else "<"
+            verdict = "sépare" if p.margin > 0 else "chevauchement"
+            print(f"    {sep.descriptor:<15} pincement si {sense} {p.threshold:6.2f}   "
+                  f"J={p.youden_j:4.2f} (seuil Youden {p.youden_threshold:6.2f})   "
+                  f"marge {p.margin:+.2f}  {verdict}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Comparaison des règles de pincement.")
     parser.add_argument("train", type=Path, nargs="+", help="jeux de données d'entraînement")
@@ -391,6 +424,11 @@ def main() -> None:
     if test is not None:
         title(f"TEST : règles, image par image ({len(test)} images, mêmes seuils)")
         print_rules(test, learned, exit_, test_settings.seconds)
+
+    title("Main au repos de profil contre pincements")
+    print_profile_comparison(train, "entraînement")
+    if test is not None:
+        print_profile_comparison(test, "test")
 
     title("Garde-fou taille de main (appris sur l'entraînement)")
     print("Pincement maintenu après 1 s : images saines (pinch_ratio < exit) contre images")

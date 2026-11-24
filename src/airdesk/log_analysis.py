@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
+
+# percentile est utilisé ici et reste importable depuis ce module (scripts, gesture_analysis).
+from airdesk.stats import percentile
 
 
 @dataclass
@@ -78,7 +80,52 @@ def read_log(path: Path) -> list[Row]:
 # au moins 1 s. Le bruit du suivi seul donne de l'ordre de 0,1 taille de main par seconde.
 IMMOBILE_SPEED = 0.5
 IMMOBILE_MIN_MS = 1000
-JITTER_GOAL_PX = 2.0  # objectif : écart-type du curseur sous 2 pixels, main immobile
+JITTER_GOAL_PX = 2.0  # objectif : tremblement du curseur sous 2 pixels, main immobile
+# Fenêtres de la moyenne glissante qui sépare le tremblement (rapide) de la dérive (lente).
+# Le résultat DÉPEND de ce choix : le curseur est déjà lissé par le filtre 1€ (coupure 0,5 Hz
+# à basse vitesse), donc le tremblement restant est lent, et une fenêtre courte (300 ms) en
+# compte une partie comme de la dérive : mesure optimiste. L'objectif est jugé sur 1 s.
+JITTER_WINDOWS_MS = (300, 1000)
+JITTER_GOAL_WINDOW_MS = 1000
+MIN_RESIDUALS = 10  # en dessous, période trop courte pour la fenêtre : « n/a »
+
+
+def frame_interval_ms(rows: list[Row]) -> float:
+    """Durée typique d'une image : médiane des écarts entre horodatages successifs."""
+    gaps = []
+    for i in range(1, len(rows)):
+        gap = rows[i].timestamp_ms - rows[i - 1].timestamp_ms
+        if gap > 0:
+            gaps.append(gap)
+    if not gaps:
+        return 33.3
+    return statistics.median(gaps)
+
+
+def window_frames(window_ms: float, interval_ms: float) -> int:
+    """Nombre d'images d'une fenêtre centrée : arrondi, puis impair (autant d'images de chaque
+    côté de l'image centrale)."""
+    frames = round(window_ms / interval_ms)
+    if frames % 2 == 0:
+        frames += 1
+    return max(frames, 3)
+
+
+def residual_std(values: list[float], frames: int) -> float | None:
+    """Écart-type de `valeur − moyenne glissante centrée sur `frames` images`.
+
+    La moyenne glissante suit les variations lentes (la dérive) ; ce qui reste est le
+    tremblement. Seules les images où la fenêtre entière tient dans la série sont utilisées.
+    None s'il en reste moins de MIN_RESIDUALS.
+    """
+    half = frames // 2
+    residuals = []
+    for i in range(half, len(values) - half):
+        window = values[i - half:i + half + 1]
+        residuals.append(values[i] - sum(window) / len(window))
+    if len(residuals) < MIN_RESIDUALS:
+        return None
+    return statistics.pstdev(residuals)
 
 
 @dataclass
@@ -86,27 +133,36 @@ class StillPeriod:
     start_ms: int
     end_ms: int
     frames: int
-    std_x: float  # écart-type de la position du curseur, en pixels
-    std_y: float
+    drift_x: float  # écart-type brut de la position du curseur (dérive + tremblement), px
+    drift_y: float
+    # Tremblement (plus grand des deux axes) pour chaque fenêtre de JITTER_WINDOWS_MS, en px ;
+    # None si la période est trop courte pour la fenêtre.
+    jitter_by_window: dict[int, float | None]
 
     @property
     def duration_ms(self) -> int:
         return self.end_ms - self.start_ms
 
     @property
-    def jitter(self) -> float:
-        """Tremblement retenu : le plus grand des deux écarts-types."""
-        return max(self.std_x, self.std_y)
+    def drift(self) -> float:
+        return max(self.drift_x, self.drift_y)
+
+    def jitter(self, window_ms: int = JITTER_GOAL_WINDOW_MS) -> float | None:
+        return self.jitter_by_window.get(window_ms)
 
 
 def still_periods(
-    rows: list[Row], max_speed: float = IMMOBILE_SPEED, min_duration_ms: int = IMMOBILE_MIN_MS
+    rows: list[Row],
+    max_speed: float = IMMOBILE_SPEED,
+    min_duration_ms: int = IMMOBILE_MIN_MS,
+    windows_ms: tuple[int, ...] = JITTER_WINDOWS_MS,
 ) -> list[StillPeriod]:
-    """Périodes où la main est immobile, avec le tremblement du curseur pendant chacune.
+    """Périodes où la main est immobile, avec dérive et tremblement du curseur.
 
     Une période = images consécutives avec main, vitesse du poignet connue et < max_speed,
     et position du curseur connue (pointage absolu), pendant au moins min_duration_ms.
     """
+    interval = frame_interval_ms(rows)
     periods: list[StillPeriod] = []
     run: list[Row] = []
     for row in rows + [None]:  # None final : ferme la dernière période
@@ -126,10 +182,27 @@ def still_periods(
             for r in run:
                 xs.append(r.cursor[0])
                 ys.append(r.cursor[1])
+            jitters: dict[int, float | None] = {}
+            for window_ms in windows_ms:
+                frames = window_frames(window_ms, interval)
+                jx = residual_std(xs, frames)
+                jy = residual_std(ys, frames)
+                jitters[window_ms] = None if jx is None or jy is None else max(jx, jy)
             periods.append(StillPeriod(run[0].timestamp_ms, run[-1].timestamp_ms, len(run),
-                                       statistics.pstdev(xs), statistics.pstdev(ys)))
+                                       statistics.pstdev(xs), statistics.pstdev(ys), jitters))
         run = []
     return periods
+
+
+def wrist_speed_quartiles(rows: list[Row]) -> tuple[float, float, float] | None:
+    """(P25, médiane, P75) de la vitesse du poignet, pour régler le seuil d'immobilité."""
+    speeds = []
+    for row in rows:
+        if row.wrist_speed is not None:
+            speeds.append(row.wrist_speed)
+    if not speeds:
+        return None
+    return percentile(speeds, 25), statistics.median(speeds), percentile(speeds, 75)
 
 
 def read_metadata(path: Path) -> dict:
@@ -144,21 +217,9 @@ def pinch_thresholds(metadata: dict) -> tuple[float, float, float]:
     return pinch["enter"], pinch["exit"], pinch["click_max_ms"]
 
 
-def percentile(values: list[float], p: float) -> float:
-    """Percentile par la méthode du « rang le plus proche ».
-
-    On trie les valeurs et on prend celle de rang ceil(p/100 × n) (rangs comptés à partir de 1).
-    Le 95e percentile est donc une valeur réellement mesurée, telle que 95 % des mesures
-    lui sont inférieures ou égales. Plus parlant que la moyenne pour la latence : quelques
-    images lentes suffisent à rendre le curseur saccadé, même si la moyenne est bonne.
-    """
-    if not values:
-        raise ValueError("Aucune valeur : percentile impossible.")
-    ordered = sorted(values)
-    rank = math.ceil(p / 100 * len(ordered))
-    if rank < 1:
-        rank = 1
-    return ordered[rank - 1]
+def release_grace(metadata: dict) -> float:
+    """Délai de relâchement en vigueur pendant la session (0 pour les anciens logs)."""
+    return metadata["config"]["pinch"].get("release_grace_ms", 0)
 
 
 @dataclass
@@ -228,48 +289,55 @@ class Pinch:
         return self.end_ms - self.start_ms
 
 
-def pinch_durations(rows: list[Row], enter: float, exit: float) -> list[Pinch]:
+def pinch_durations(
+    rows: list[Row], enter: float, exit: float, outcome_extra_ms: float = 0
+) -> list[Pinch]:
     """Retrouve chaque pincement à partir de `pinch_ratio` et de l'hystérésis enter/exit.
 
     Début : `pinch_ratio` passe sous `enter`. Fin : il repasse à `exit` ou au-dessus
     (mêmes comparaisons que la machine à états), ou la main disparaît.
     On ne se sert PAS des états enregistrés pour mesurer la durée : ils dépendent de
     `click_max_ms`, le seuil qu'on cherche justement à régler.
-    L'issue observée (clic / glisser) est gardée à côté, pour comparer.
+
+    L'issue observée (clic / glisser) est gardée à côté, pour comparer. Avec un délai de
+    relâchement (release_grace_ms), la machine émet le clic APRÈS la fin mesurée ici : on
+    cherche donc les événements jusqu'à `fin + outcome_extra_ms` (en pratique
+    release_grace_ms + une image), sans dépasser le début du pincement suivant.
     """
-    pinches: list[Pinch] = []
+    # 1) Début et fin de chaque pincement.
+    spans: list[tuple[int, int, str]] = []
     pinched = False
     start_ms = 0
-    events_seen: list[str] = []
-
     for row in rows:
         if row.pinch_ratio is None:  # pas de main
             if pinched:
-                pinches.append(
-                    Pinch(start_ms, row.timestamp_ms, outcome_of(events_seen), END_HAND_LOST)
-                )
+                spans.append((start_ms, row.timestamp_ms, END_HAND_LOST))
                 pinched = False
             continue
-
         if not pinched:
             if row.pinch_ratio < enter:
                 pinched = True
                 start_ms = row.timestamp_ms
-                events_seen = list(row.events)
             continue
-
-        # Pincement en cours. Les événements de l'image de fin comptent aussi :
-        # c'est là que la machine émet Click ou Release.
-        for name in row.events:
-            events_seen.append(name)
         if row.pinch_ratio >= exit:
-            pinches.append(
-                Pinch(start_ms, row.timestamp_ms, outcome_of(events_seen), END_RELEASED)
-            )
+            spans.append((start_ms, row.timestamp_ms, END_RELEASED))
             pinched = False
-
     if pinched:
-        pinches.append(Pinch(start_ms, rows[-1].timestamp_ms, outcome_of(events_seen), END_LOG))
+        spans.append((start_ms, rows[-1].timestamp_ms, END_LOG))
+
+    # 2) Issue : événements émis pendant le pincement et juste après (délai de relâchement).
+    pinches: list[Pinch] = []
+    for i in range(len(spans)):
+        start, end, ended_by = spans[i]
+        limit = end + outcome_extra_ms
+        if i + 1 < len(spans) and spans[i + 1][0] <= limit:
+            limit = spans[i + 1][0] - 1  # ne pas déborder sur le pincement suivant
+        events_seen: list[str] = []
+        for row in rows:
+            if start <= row.timestamp_ms <= limit:
+                for name in row.events:
+                    events_seen.append(name)
+        pinches.append(Pinch(start, end, outcome_of(events_seen), ended_by))
     return pinches
 
 

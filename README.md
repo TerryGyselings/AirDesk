@@ -16,8 +16,9 @@ Projet innovation-recherche — ESIR, Université de Rennes (2026-2027).
 
 | Geste | Effet |
 | --- | --- |
-| Main ouverte face à la caméra pendant 0,3 s | Active le contrôle (et choisit la main suivie) |
+| Main pilote ouverte dans la zone d'interaction pendant 0,3 s | Active le contrôle |
 | Déplacer la main dans la zone d'interaction | Place le curseur (pointage absolu) |
+| Baisser la main sous la zone pendant 0,5 s | Retour en veille (un glisser est relâché) |
 | Pincement bref pouce-index (< `click_max_ms`, 0,4 s) | Clic gauche |
 | Pincement maintenu puis déplacement | Glisser-déposer (ex. déplacer une fenêtre par sa barre de titre) |
 | Main hors du champ plus de 1 s | Retour en veille |
@@ -41,8 +42,10 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
 **Pointage** (`pointer` dans `gestures.yaml`) :
 
 - **Absolu (par défaut)** : une **zone d'interaction** de l'image (par défaut 15 %..85 % en
-  largeur, 15 %..75 % en hauteur) correspond à tout l'écran. Elle est dessinée en bleu clair
+  largeur, 20 %..80 % en hauteur) correspond à tout l'écran. Elle est dessinée en bleu clair
   dans la fenêtre de debug : y garder la main. Hors zone, le curseur reste collé au bord.
+- **Main baissée = veille** : on n'active, et on ne commence un pincement, que main dans la
+  zone. Une main posée sous la zone pendant 0,5 s remet AirDesk en veille.
   Le curseur ne se désynchronise jamais de la main. Il reste figé pendant un pincement court,
   pour que le clic tombe où l'on visait.
 - **Relatif** (`mode: relative`) : comme un pavé tactile, la main déplace le curseur.
@@ -59,10 +62,15 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
   `python scripts/analyse_log.py` mesurent le tremblement du curseur main immobile
   (objectif < 2 px).
 
-**Deux mains dans le champ** : AirDesk suit la main qui fait le geste d'activation, en
-préférant `hand.preferred` (droite par défaut). Une fois actif, il suit cette main par
-continuité et ignore l'autre (affichée en gris dans la fenêtre de debug), jusqu'au retour
-en veille.
+**Deux mains dans le champ** : seule la **main pilote** (`hand.preferred`, droite par
+défaut) active et pilote. L'autre main est une main d'appoint, sans effet : elle ne prend
+jamais le contrôle, même si la main pilote sort du champ. Pour piloter de la main gauche :
+`hand.preferred: left` (ou `any` pour l'ancien comportement : n'importe quelle main).
+
+**Fluidité** : chercher 2 mains coûte cher (≈ 19 ms par image au lieu de 9) ; AirDesk ne le
+fait qu'en veille, pour trouver la main pilote, puis suit une seule main. Au démarrage, un
+avertissement s'affiche si la caméra donne moins de 25 images/s (souvent : pièce trop
+sombre).
 
 ## Installation
 

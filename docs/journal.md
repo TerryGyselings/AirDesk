@@ -186,3 +186,55 @@ Retour d'usage réel de P01 (sans --dry-run) : « ça marche bien », avec trois
      (`hand_tracker.user_side`).
 - Vérifié : 178 tests ; démarrage réel sans erreur (écran 2560x1440 détecté, colonnes du
   log). **Pas encore testé en usage réel** : pointage absolu, deux mains, main de profil.
+
+## 2026-11-24 — Deuxième essai réel : zone, main baissée, rôles des mains, performances
+
+Retour d'usage de P01 (commit 843a220) :
+- pointage absolu **précis** (croix d'une fenêtre en 1-2 essais), léger tremblement non
+  gênant ; mais **zone inconfortable** (il faut reculer et lever le bras) ;
+- main au repos de profil, pouce contre l'index : **encore un clic** avec min_palm_width 0,22 ;
+- deux mains : la main activée reste suivie, mais **quand elle sort du champ, l'autre main
+  prend le contrôle** ;
+- log 17-33-21 : 24 i/s et 18,8 ms de traitement (contre 30 i/s et 9,2 ms), section
+  « tremblement » absente, issue « aucune » pour les vrais clics.
+
+Analyses et décisions :
+- **Changement de main, cause** (log 17-33-21) : la main droite sort à 43,0 s ; 1 s plus
+  tard, veille ; le sélecteur prend la main gauche, à demi fermée, qui **s'ouvre** (4 doigts,
+  paume de face 0,96) 300 ms : activation à 44,2 s. Ce n'était pas une erreur de suivi : le
+  geste d'activation, trop facile pour une main au repos, pouvait être fait par n'importe
+  quelle main. **Décision (P01) : des rôles** (Guiard, 1987, modèle de la chaîne
+  cinématique : main dominante pour la précision, main non dominante comme référence).
+  Seule la main préférée active et pilote ; l'autre est une main d'appoint, sans effet seule,
+  sans rôle dès que la main pilote est perdue (structure prête pour de futurs gestes à deux
+  mains, ignorée pour l'instant). Toute activation exige en plus la main ouverte DANS la zone.
+- **Main baissée = veille** : pincement seulement dans la zone (`only_in_zone`), veille après
+  500 ms sous la zone (`rest_ms`, Release propre si glisser), activation seulement dans la
+  zone (`activate_in_zone`, indispensable : sinon une main ouverte posée en bas se
+  réactiverait et la machine oscillerait). Règle de conception, indépendante des seuils : elle
+  vise aussi la main au repos de profil, souvent basse.
+- **Zone** : zone par défaut abaissée de 0,05 (y 0,20..0,80) : en usage réel,
+  point de pointage collé en bas 3 % du temps contre 0,15 % en haut, hauteur médiane 0,50.
+- **Performances** : avec une main visible, 8,6 ms (modèle 1 main) contre 19,2 ms (modèle 2
+  mains). MediaPipe ne suit une main qu'une fois TOUTES les mains demandées trouvées ; sinon
+  il relance la détection de paume à chaque image. num_hands étant fixé à la création, deux
+  modèles : 2 mains en veille (choisir la main pilote) et après une perte, 1 main une fois
+  actif. Le gain n'apparaît qu'une fois actif (en veille, main visible : toujours ≈ 19 ms).
+  Caméra à 24,8 i/s en fin de journée : avertissement au démarrage sous 25 i/s.
+- **Tremblement, mesure corrigée** : la section s'affichait bien avec le code actuel, mais la
+  mesure comptait la dérive lente (médiane 16 px, max 30 px). Désormais : tremblement =
+  écart-type autour d'une moyenne glissante. **Le résultat dépend de la fenêtre** : le curseur
+  est déjà lissé par le 1€ (coupure 0,5 Hz), son tremblement restant est lent, et une fenêtre
+  de 300 ms le prend en partie pour de la dérive (mesure optimiste ; vérifié par un test :
+  sinusoïde ±3 px à 1 Hz, 2,1 px mesurés sur 1 s, bien moins sur 300 ms). Objectif jugé sur
+  1 s. Log 17-33-21 : **médiane 2,75 px, maximum 4,36 px sur 1 s** (0,45 à 3,3 px sur 300 ms),
+  au-dessus de l'objectif de 2 px mais jugé « non gênant » par P01.
+- **Issue des clics** : avec release_grace_ms = 66, le clic est émis après la fin mesurée
+  sur pinch_ratio ; l'issue est désormais cherchée jusqu'à fin + délai + 1 image. Log
+  17-33-21 : les 5 clics et 3 glisser sont retrouvés.
+- **Main de profil** : pas de session v3 encore. L'analyse comparative (main_repos_profil
+  contre pincement maintenu et répétés ; pinch_ratio, pinch_seg, palm_width, palm_facing,
+  ext_autres_max, wrist_y ; marge et Youden dans le meilleur sens) est prête.
+  min_palm_width reste à 0,22.
+- À faire : étalonnage de la zone par poste, session v3, puis décider de l'indice contre la main de
+  profil ; vérifier en réel le gain de fluidité une fois actif.

@@ -26,7 +26,8 @@ STATE_COLORS = {
     State.PINCHING: (0, 200, 255),
     State.DRAGGING: (255, 120, 0),
 }
-IGNORED_COLOR = (110, 110, 110)  # main visible mais non suivie
+IGNORED_COLOR = (110, 110, 110)  # main visible sans rôle
+SUPPORT_COLOR = (170, 130, 90)  # main d'appoint (bleu-gris), sans effet pour l'instant
 ZONE_COLOR = (255, 255, 0)
 
 
@@ -50,10 +51,12 @@ def draw_debug(
     fps: float,
     processing_ms: float,
     zone: ZoneConfig | None = None,
+    support: int | None = None,
 ) -> np.ndarray:
-    """`hands` : toutes les mains détectées ; `selected` : indice de la main suivie.
+    """`hands` : toutes les mains détectées ; `selected` : indice de la main pilote ;
+    `support` : indice de la main d'appoint (sans effet pour l'instant).
 
-    `zone` : zone d'interaction du pointage absolu, dessinée pour savoir où placer la main.
+    `zone` : zone d'interaction, dessinée pour savoir où placer la main.
     """
     h, w = image.shape[:2]
     color = STATE_COLORS[state]
@@ -66,6 +69,8 @@ def draw_debug(
     for i in range(len(hands)):
         if i == selected:
             draw_hand(image, hands[i], color)
+        elif i == support:
+            draw_hand(image, hands[i], SUPPORT_COLOR)
         else:
             draw_hand(image, hands[i], IGNORED_COLOR)
 
@@ -81,9 +86,9 @@ def draw_debug(
     else:
         lines.append("aucune main suivie")
     if len(hands) > 1:
-        lines.append(f"{len(hands)} mains : la grise est ignoree")
+        lines.append(f"{len(hands)} mains : seule la main pilote agit")
     if state == State.IDLE:
-        lines.append("Montre ta main ouverte pour activer")
+        lines.append("Main pilote ouverte dans le cadre pour activer")
 
     y = 30
     for text in lines:

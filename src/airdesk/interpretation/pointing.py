@@ -38,3 +38,14 @@ def zone_to_screen(x: float, y: float, zone: ZoneConfig) -> tuple[float, float]:
     u = (x - zone.left) / width
     v = (y - zone.top) / height
     return clamp(u), clamp(v)
+
+
+def in_zone(x: float, y: float, zone: ZoneConfig) -> bool:
+    """Vrai si le point est dans la zone d'interaction (bords compris, sans bornage)."""
+    return zone.left <= x <= zone.right and zone.top <= y <= zone.bottom
+
+
+def below_zone(y: float, zone: ZoneConfig) -> bool:
+    """Vrai si le point est sous le bord bas de la zone (main baissée)."""
+    return y > zone.bottom
+

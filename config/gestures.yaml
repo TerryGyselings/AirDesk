@@ -7,6 +7,12 @@ engagement:
   hold_ms: 300
   # Si la main disparaît plus longtemps que ça, retour en veille.
   lost_timeout_ms: 1000
+  # Main baissée = veille : si le point de pointage reste sous le bord bas de la zone
+  # d'interaction pendant ce temps, retour en veille (un glisser est relâché). 0 = désactivé.
+  rest_ms: 500
+  # La main ouverte n'active que dans la zone d'interaction (une main ouverte posée en bas
+  # ne réactive pas ; sans ça, « main baissée = veille » oscillerait entre veille et actif).
+  activate_in_zone: true
 
 pinch:
   # Hystérésis : on entre en pincement sous "enter", on en sort au-dessus de "exit".
@@ -44,13 +50,21 @@ pinch:
   #   0,40 en rejetait 22 % / 35 % (répétés 9/10 -> 5/10 au test) ; 0,22 en rejette
   #   0 % / 7,5 % et écarte encore une main franchement de profil.
   min_palm_width: 0.22
+  # Un pincement ne peut commencer que si le point de pointage est dans la zone
+  # d'interaction (main levée) ; un pincement commencé dans la zone continue au-delà.
+  only_in_zone: true
 
 hand:
-  # Main suivie quand deux mains sont visibles : right, left ou any (côté de l'utilisateur).
+  # Main PILOTE : seule une main de ce côté active et pilote (right, left ; any = n'importe
+  # laquelle, ancien comportement). L'autre main est une main d'appoint, sans effet seule
+  # (Guiard, 1987 ; voir interpretation/hand_selection.py).
   preferred: right
-  # Une fois actif, on suit la main par continuité ; un saut du poignet plus grand que ça
-  # (en tailles de main, d'une image à l'autre) = main suivie perdue, l'autre est ignorée.
+  # Une fois actif, on suit la main pilote par continuité ; un saut du poignet plus grand que
+  # ça (en tailles de main, d'une image à l'autre) = main pilote perdue.
   max_jump: 1.5
+  # Suivre aussi la main d'appoint une fois actif (futurs gestes à deux mains) : ~10 ms de
+  # plus par image (MediaPipe doit chercher 2 mains). Inutile pour l'instant.
+  track_support: false
 
 quality:
   # Garde-fou : une image est ignorée (comme « main absente ») si hand_size tombe sous
@@ -73,11 +87,13 @@ pointer:
   mode: absolute
   # Zone d'interaction, en fractions de l'image (0 = bord gauche / haut, 1 = droit / bas).
   # Hors zone, le curseur reste collé au bord de l'écran. Dessinée dans la fenêtre de debug.
+  # Défaut abaissé de 0,05 le 2026-11-24 (usage réel de P01 : point de
+  # pointage collé en bas 3 % du temps contre 0,15 % en haut, hauteur médiane 0,50).
   zone:
     left: 0.15
     right: 0.85
-    top: 0.15
-    bottom: 0.75
+    top: 0.20
+    bottom: 0.80
   # Écran couvert en mode absolu : primary (écran principal) ou all (rectangle englobant de
   # tous les écrans ; voir les limites dans le README).
   screen: primary

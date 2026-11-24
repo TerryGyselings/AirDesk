@@ -5,7 +5,7 @@ import pytest
 from airdesk.actuator.base import Actuator
 from airdesk.actuator.screen import ScreenRect, bounding_rect
 from airdesk.config import ZoneConfig
-from airdesk.interpretation.pointing import zone_to_screen
+from airdesk.interpretation.pointing import below_zone, in_zone, zone_to_screen
 from airdesk.interpretation.state_machine import MoveTo
 
 ZONE = ZoneConfig(left=0.15, right=0.85, top=0.15, bottom=0.75)
@@ -41,6 +41,15 @@ def test_off_center_zone():
 def test_empty_zone_is_rejected_in_french():
     with pytest.raises(ValueError, match="Zone d'interaction vide"):
         zone_to_screen(0.5, 0.5, ZoneConfig(left=0.6, right=0.4))
+
+
+def test_in_zone_and_below_zone():
+    assert in_zone(0.5, 0.5, ZONE)
+    assert in_zone(0.15, 0.75, ZONE)  # bords compris
+    assert not in_zone(0.10, 0.5, ZONE)
+    assert below_zone(0.80, ZONE)
+    assert not below_zone(0.75, ZONE)
+    assert not below_zone(0.05, ZONE)  # au-dessus n'est pas « baissée »
 
 
 # --- Écran et pixels ---------------------------------------------------------------------------

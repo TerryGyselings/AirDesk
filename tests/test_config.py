@@ -4,11 +4,14 @@ import yaml
 
 from airdesk.config import (
     CameraConfig,
+    ZoneConfig,
     apply_cli_overrides,
     load_config,
     merge_settings,
     read_yaml,
     save_camera_settings,
+    save_local_section,
+    save_zone,
 )
 
 
@@ -106,6 +109,24 @@ def test_save_creates_the_local_file(tmp_path):
     save_camera_settings(path, 1, "dshow", 640, 480)
     cfg = load_config(tmp_path / "absent.yaml", local_path=path)
     assert cfg.camera == CameraConfig(index=1, backend="dshow", width=640, height=480)
+
+
+def test_save_zone_keeps_the_other_pointer_keys(tmp_path):
+    path = write_yaml(tmp_path / "local.yaml", {"pointer": {"mode": "relative"},
+                                                "camera": {"index": 1}})
+    save_zone(path, ZoneConfig(left=0.1, right=0.8, top=0.3, bottom=0.9))
+    raw = read_yaml(path)
+    assert raw["pointer"]["mode"] == "relative"  # conservé
+    assert raw["pointer"]["zone"] == {"left": 0.1, "right": 0.8, "top": 0.3, "bottom": 0.9}
+    assert raw["camera"] == {"index": 1}
+    cfg = load_config(tmp_path / "absent.yaml", local_path=path)
+    assert cfg.pointer.zone == ZoneConfig(left=0.1, right=0.8, top=0.3, bottom=0.9)
+
+
+def test_save_local_section_merges_keys(tmp_path):
+    path = write_yaml(tmp_path / "local.yaml", {"pinch": {"enter": 0.2, "exit": 0.4}})
+    save_local_section(path, "pinch", {"enter": 0.22})
+    assert read_yaml(path)["pinch"] == {"enter": 0.22, "exit": 0.4}
 
 
 def test_save_keeps_the_other_sections(tmp_path):

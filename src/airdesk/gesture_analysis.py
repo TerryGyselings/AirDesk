@@ -26,7 +26,7 @@ from pathlib import Path
 from airdesk.interpretation.features import palm_facing, palm_width, pinch_segment
 from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_candidate
 from airdesk.interpretation.quality import HandSizeGuard
-from airdesk.log_analysis import percentile
+from airdesk.stats import percentile
 
 POSITIVE_LABEL = "pincement_maintenu"
 NEGATIVE_LABELS = ["main_ouverte", "poing", "poing_ouvre_ferme", "main_relachee", "parasites",
@@ -61,6 +61,8 @@ class Sample:
     # Orientation de la paume, recalculée elle aussi à partir des 21 points.
     palm_width: float | None = None
     palm_facing: float | None = None
+    # Hauteur du poignet dans l'image (0 = haut, 1 = bas), protocole v2 et suivants.
+    wrist_y: float | None = None
 
     @property
     def hand_present(self) -> bool:
@@ -135,6 +137,7 @@ def read_dataset(path: Path) -> list[Sample]:
                     pinch_seg_68=pinch_seg_68,
                     palm_width=width,
                     palm_facing=facing,
+                    wrist_y=float(record["wrist_y"]) if record.get("wrist_y") else None,
                 )
             )
     return samples
@@ -213,7 +216,7 @@ def describe(values: list[float]) -> Stats | None:
 # « autres_max » = la plus grande extension parmi majeur, annulaire, auriculaire :
 # petite si tous ces doigts sont repliés (poing), c'est ce que testent les règles C et D.
 DESCRIPTORS = ["pinch_ratio", "pinch_seg", "pinch_seg_68", "ext_index", "ext_index_3d",
-               "ext_autres_max", "ext_autres_max_3d", "palm_width", "palm_facing"]
+               "ext_autres_max", "ext_autres_max_3d", "palm_width", "palm_facing", "wrist_y"]
 
 
 def descriptor_value(name: str, s: Sample) -> float | None:
@@ -228,6 +231,8 @@ def descriptor_value(name: str, s: Sample) -> float | None:
         return s.palm_width
     if name == "palm_facing":
         return s.palm_facing
+    if name == "wrist_y":
+        return s.wrist_y
     if name == "ext_index":
         return s.extensions[0]
     if name == "ext_index_3d":
@@ -739,6 +744,83 @@ def propose_thresholds(samples: list[Sample], enter: float) -> dict[str, Proposa
                 neg_values.append(value)
         proposals[threshold_name] = propose_threshold(pos_values, neg_values)
     return proposals
+
+
+@dataclass
+class Separation:
+    """Meilleure séparation d'un indice entre deux groupes, dans le bon sens."""
+
+    descriptor: str
+    higher_is_pinch: bool  # True : pincement si valeur > seuil ; False : si valeur < seuil
+    proposal: Proposal
+
+
+def best_separation(
+    descriptor: str, pinch_values: list[float], other_values: list[float]
+) -> Separation | None:
+    """Essaie les deux sens (« pincement = valeur haute » et « = valeur basse ») et garde celui
+    qui a le meilleur indice de Youden. Pour le sens « bas », on travaille sur les valeurs
+    opposées (−x), puis on remet le seuil dans le bon signe.
+    """
+    if not pinch_values or not other_values:
+        return None
+    high = propose_threshold(pinch_values, other_values)
+    negated_pinch = []
+    for v in pinch_values:
+        negated_pinch.append(-v)
+    negated_other = []
+    for v in other_values:
+        negated_other.append(-v)
+    low = propose_threshold(negated_pinch, negated_other)
+    if high.youden_j >= low.youden_j:
+        return Separation(descriptor, True, high)
+    # Remise dans le bon signe : seuil et percentiles changent de signe.
+    flipped = Proposal(
+        threshold=-low.threshold,
+        margin=low.margin,
+        p5_positives=-low.p5_positives,  # = P95 des valeurs de pincement
+        p95_negatives=-low.p95_negatives,  # = P5 des autres valeurs
+        youden_threshold=-low.youden_threshold,
+        youden_j=low.youden_j,
+        n_positives=low.n_positives,
+        n_negatives=low.n_negatives,
+    )
+    return Separation(descriptor, False, flipped)
+
+
+PROFILE_LABEL = "main_repos_profil"
+PROFILE_DESCRIPTORS = ["pinch_ratio", "pinch_seg", "palm_width", "palm_facing", "ext_autres_max",
+                       "wrist_y"]
+
+
+def profile_separations(samples: list[Sample], pinch_label: str) -> list[Separation]:
+    """Pour chaque indice, séparation entre `pinch_label` et la main au repos de profil,
+    classée du meilleur (Youden le plus haut) au moins bon. Liste vide sans l'étiquette."""
+    pinch = frame_samples(samples, pinch_label)
+    profile = frame_samples(samples, PROFILE_LABEL)
+    if not pinch or not profile:
+        return []
+    results = []
+    for name in PROFILE_DESCRIPTORS:
+        pinch_values = []
+        for s in pinch:
+            value = descriptor_value(name, s)
+            if value is not None:
+                pinch_values.append(value)
+        other_values = []
+        for s in profile:
+            value = descriptor_value(name, s)
+            if value is not None:
+                other_values.append(value)
+        separation = best_separation(name, pinch_values, other_values)
+        if separation is not None:
+            results.append(separation)
+
+    def youden_of(separation: Separation) -> float:
+        return separation.proposal.youden_j
+
+    results.sort(key=youden_of, reverse=True)
+    return results
 
 
 def thresholds_from_proposals(

@@ -24,6 +24,10 @@ LOCAL_CONFIG_PATH = PROJECT_ROOT / "config" / "local.yaml"
 class EngagementConfig:
     hold_ms: float = 300
     lost_timeout_ms: float = 1000
+    # Main baissée sous la zone d'interaction pendant rest_ms -> veille (0 = désactivé).
+    rest_ms: float = 0
+    # La main ouverte n'active que si le point de pointage est dans la zone d'interaction.
+    activate_in_zone: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,8 @@ class PinchConfig:
     # Entrée en pincement seulement si la paume fait face à la caméra (palm_width).
     require_palm_facing: bool = False
     min_palm_width: float = 0.0
+    # Un pincement ne peut commencer que si le point de pointage est dans la zone.
+    only_in_zone: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,8 +76,8 @@ class ZoneConfig:
 
     left: float = 0.15
     right: float = 0.85
-    top: float = 0.15
-    bottom: float = 0.75
+    top: float = 0.20
+    bottom: float = 0.80
 
 
 @dataclass(frozen=True)
@@ -117,8 +123,11 @@ class FilterModes:
 class HandConfig:
     """Choix de la main suivie quand deux mains sont visibles."""
 
-    preferred: str = "right"  # "right", "left" ou "any" (côté de l'utilisateur)
+    preferred: str = "right"  # main pilote : "right", "left" ou "any" (côté de l'utilisateur)
     max_jump: float = 1.5  # saut maximal du poignet entre deux images, en tailles de main
+    # Suivre la main d'appoint une fois actif (futurs gestes à deux mains). Coûte ~10 ms par
+    # image : MediaPipe doit alors chercher 2 mains à chaque image.
+    track_support: bool = False
 
 
 @dataclass(frozen=True)
@@ -238,17 +247,36 @@ def apply_cli_overrides(
     return replace(camera, **changes)
 
 
-def save_camera_settings(
-    path: Path, index: int, backend: str, width: int, height: int
-) -> None:
-    """Écrit (ou remplace) la section `camera:` de local.yaml, sans toucher aux autres sections.
+def save_local_section(path: Path, section: str, values: dict) -> None:
+    """Écrit des clés dans une section de local.yaml, sans toucher au reste.
 
+    Les autres clés de la section et les autres sections sont conservées ; les clés données
+    remplacent les anciennes (ex. section "pointer", values {"zone": {...}}).
     Attention : le fichier est réécrit par le module yaml, donc les commentaires d'un local.yaml
     existant sont perdus.
     """
     raw = read_yaml(path)
-    raw["camera"] = {"index": index, "backend": backend, "width": width, "height": height}
+    current = dict(raw.get(section) or {})
+    for key, value in values.items():
+        current[key] = value
+    raw[section] = current
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Réglages propres à cette machine (non versionné). Voir local.example.yaml.\n")
         yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False)
+
+
+def save_camera_settings(
+    path: Path, index: int, backend: str, width: int, height: int
+) -> None:
+    """Écrit (ou remplace) la caméra dans local.yaml (`scripts/check_camera.py --save`)."""
+    save_local_section(
+        path, "camera", {"index": index, "backend": backend, "width": width, "height": height}
+    )
+
+
+def save_zone(path: Path, zone: ZoneConfig) -> None:
+    """Écrit la zone d'interaction étalonnée dans local.yaml (étalonnage)."""
+    values = {"left": round(zone.left, 3), "right": round(zone.right, 3),
+              "top": round(zone.top, 3), "bottom": round(zone.bottom, 3)}
+    save_local_section(path, "pointer", {"zone": values})

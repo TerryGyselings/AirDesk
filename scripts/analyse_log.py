@@ -21,13 +21,18 @@ from airdesk.log_analysis import (
     IMMOBILE_MIN_MS,
     IMMOBILE_SPEED,
     JITTER_GOAL_PX,
+    JITTER_GOAL_WINDOW_MS,
+    JITTER_WINDOWS_MS,
+    frame_interval_ms,
     pinch_durations,
     pinch_thresholds,
     read_log,
     read_metadata,
+    release_grace,
     still_periods,
     summarize,
     text_histogram,
+    wrist_speed_quartiles,
 )
 from airdesk.session_log import LOG_DIR
 
@@ -58,9 +63,11 @@ def main() -> None:
     print(f"Log : {csv_path}")
 
     json_path = csv_path.with_suffix(".json")
+    grace_ms = 0
     if json_path.exists():
         metadata = read_metadata(json_path)
         enter, exit_, click_max_ms = pinch_thresholds(metadata)
+        grace_ms = release_grace(metadata)
         camera = metadata.get("camera", {})
         git = metadata.get("git", {})
         commit = git.get("commit") or "inconnu"
@@ -78,7 +85,9 @@ def main() -> None:
         print(f"ATTENTION : {json_path.name} introuvable, seuils lus dans la config ACTUELLE.")
         pinch = load_config().pinch
         enter, exit_, click_max_ms = pinch.enter, pinch.exit, pinch.click_max_ms
-    print(f"Seuils : enter={enter}, exit={exit_}, click_max_ms={click_max_ms}\n")
+        grace_ms = pinch.release_grace_ms
+    print(f"Seuils : enter={enter}, exit={exit_}, click_max_ms={click_max_ms}, "
+          f"release_grace_ms={grace_ms:g}\n")
 
     s = summarize(rows)
     print(f"Images : {s.frames} en {s.duration_s:.2f} s, soit {s.fps_mean:.1f} images/s en moyenne")
@@ -88,8 +97,12 @@ def main() -> None:
     )
     print(f"Événements : {s.clicks} clic(s), {s.drags} glisser\n")
 
-    pinches = pinch_durations(rows, enter, exit_)
-    print(f"Pincements (d'après pinch_ratio, hystérésis {enter} / {exit_}) : {len(pinches)}")
+    # Avec un délai de relâchement, le clic est émis après la fin mesurée sur pinch_ratio :
+    # on cherche l'issue jusqu'à fin + délai + une image.
+    outcome_extra_ms = grace_ms + frame_interval_ms(rows)
+    pinches = pinch_durations(rows, enter, exit_, outcome_extra_ms)
+    print(f"Pincements (d'après pinch_ratio, hystérésis {enter} / {exit_}) : {len(pinches)}"
+          f" ; issue cherchée jusqu'à {outcome_extra_ms:.0f} ms après la fin")
     if pinches:
         print(f"{'début (ms)':>10} | {'durée':>7} | {'issue observée':<14} | {'fin':<11} | seuil")
     durations = []
@@ -114,34 +127,60 @@ def main() -> None:
     print_jitter(rows, args.immobile_speed)
 
 
+def cell(value: float | None) -> str:
+    return "    n/a" if value is None else f"{value:5.2f} px"
+
+
 def print_jitter(rows, max_speed: float) -> None:
-    """Tremblement du curseur pendant les périodes où la main est immobile."""
+    """Tremblement du curseur pendant les périodes où la main est immobile (toujours affiché)."""
     print(f"\nTremblement du curseur, main immobile (poignet < {max_speed:g} taille de main/s "
           f"pendant >= {IMMOBILE_MIN_MS / 1000:g} s) :")
+    quartiles = wrist_speed_quartiles(rows)
+    if quartiles is None:
+        print("  Vitesse du poignet absente de ce log (enregistré avant cette mesure).")
+    else:
+        p25, median, p75 = quartiles
+        print(f"  Vitesse du poignet sur tout le log : P25 {p25:.2f}, médiane {median:.2f}, "
+              f"P75 {p75:.2f} taille de main/s (réglage : --immobile-speed)")
     has_cursor = False
     for row in rows:
         if row.cursor is not None:
             has_cursor = True
             break
     if not has_cursor:
-        print("  Pas de position de curseur dans ce log (pointage relatif, ou log enregistré "
-              "avant cette mesure).")
+        print("  0 période immobile trouvée : pas de position de curseur dans ce log (pointage "
+              "relatif, ou log enregistré avant cette mesure).")
         return
     periods = still_periods(rows, max_speed)
     if not periods:
-        print("  Aucune période immobile assez longue : garder la main immobile 2-3 s, "
-              "plusieurs fois, pendant l'enregistrement.")
+        print("  0 période immobile trouvée : garder la main immobile 2-3 s, plusieurs fois, ou "
+              "relever --immobile-speed.")
         return
-    print(f"  {'début (ms)':>10} | {'durée':>7} | {'images':>6} | {'é.-t. x':>8} | {'é.-t. y':>8}")
-    jitters = []
+
+    short, long = JITTER_WINDOWS_MS
+    print(f"  Dérive = écart-type brut ; tremblement = écart-type autour d'une moyenne glissante "
+          f"de {short} ms ou {long} ms.")
+    print("  Le tremblement DÉPEND de cette fenêtre : le curseur est déjà lissé par le filtre 1€,")
+    print(f"  son tremblement restant est lent, et la fenêtre de {short} ms en compte une partie "
+          "comme de la dérive")
+    print(f"  (mesure optimiste). L'objectif < {JITTER_GOAL_PX:g} px est jugé sur "
+          f"{JITTER_GOAL_WINDOW_MS} ms.\n")
+    print(f"  {'début (ms)':>10} | {'durée':>7} | {'images':>6} | {'dérive':>8} | "
+          f"{f'tremb. {short}':>10} | {f'tremb. {long}':>11}")
+    goal_values = []
     for p in periods:
-        jitters.append(p.jitter)
-        print(f"  {p.start_ms:>10} | {p.duration_ms:>4} ms | {p.frames:>6} | {p.std_x:6.2f} px |"
-              f" {p.std_y:6.2f} px")
-    median = statistics.median(jitters)
-    worst = max(jitters)
+        print(f"  {p.start_ms:>10} | {p.duration_ms:>4} ms | {p.frames:>6} | {p.drift:5.2f} px | "
+              f"{cell(p.jitter(short)):>10} | {cell(p.jitter(long)):>11}")
+        if p.jitter(JITTER_GOAL_WINDOW_MS) is not None:
+            goal_values.append(p.jitter(JITTER_GOAL_WINDOW_MS))
+    if not goal_values:
+        print(f"  {len(periods)} période(s), toutes trop courtes pour la fenêtre de "
+              f"{JITTER_GOAL_WINDOW_MS} ms : garder la main immobile plus longtemps.")
+        return
+    median = statistics.median(goal_values)
+    worst = max(goal_values)
     verdict = "OK" if worst < JITTER_GOAL_PX else "AU-DESSUS de l'objectif"
-    print(f"  {len(periods)} période(s) ; tremblement (plus grand écart-type x/y) : médiane "
+    print(f"  {len(periods)} période(s) ; tremblement sur {JITTER_GOAL_WINDOW_MS} ms : médiane "
           f"{median:.2f} px, maximum {worst:.2f} px -> objectif < {JITTER_GOAL_PX:g} px : "
           f"{verdict}")
     if worst >= JITTER_GOAL_PX:
