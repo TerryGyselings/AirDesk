@@ -33,14 +33,20 @@ from airdesk.gesture_analysis import (
     EpisodeSettings,
     Sample,
     SweepRow,
+    add_closing_speeds,
     best_separation,
     confusion,
     count_episodes,
     count_sequences,
     describe,
     detection_rate,
+    entry_details,
+    entry_moments,
+    entry_separations,
     episode_metrics,
     frame_samples,
+    has_profile_data,
+    profile_metrics,
     profile_separations,
     propose_hand_size_ratio,
     propose_threshold,
@@ -605,3 +611,102 @@ def test_read_dataset_computes_pinch_seg_from_landmarks(tmp_path):
     assert sample.pinch_seg == pytest.approx(0.0)
     assert sample.pinch_seg_68 == pytest.approx(0.0)
     assert sample.pinch_ratio == 0.5
+
+
+# --- Main tournée vers la gauche (protocole v4) -------------------------------------------------
+
+
+def series(label, ratios, ratios_3d=None, step=33, start=0):
+    """Une prise : un pinch_ratio par image (None = pas de main), autres doigts ouverts."""
+    samples = []
+    for i in range(len(ratios)):
+        if ratios[i] is None:
+            samples.append(Sample(label, start + i * step, None, None, None))
+            continue
+        s = Sample(label, start + i * step, ratios[i], OPEN_OTHERS, OPEN_OTHERS, 0.2)
+        s.pinch_ratio_3d = ratios_3d[i] if ratios_3d else ratios[i]
+        samples.append(s)
+    return samples
+
+
+def fast_pinches(label, count=3):
+    """Vrais pincements : les doigts se ferment vite (0,8 -> 0,1 en ~130 ms). La prise
+    commence par 200 ms doigts écartés, le temps d'avoir l'historique de la vitesse."""
+    ratios = [0.8] * 6
+    for _ in range(count):
+        ratios += [0.8, 0.8, 0.8, 0.8, 0.6, 0.4, 0.2, 0.1, 0.1, 0.1, 0.6, 0.8]
+    return series(label, ratios)
+
+
+def slow_profile_drift(label, count=3):
+    """Pivot de profil : pinch_ratio 2D descend LENTEMENT sous enter (le pouce passe devant
+    l'index), et en 3D les doigts restent séparés (0,6)."""
+    ratios = []
+    ratios_3d = []
+    for _ in range(count):
+        block = [0.40, 0.38, 0.36, 0.34, 0.32, 0.30, 0.28, 0.26, 0.24, 0.22, 0.22, 0.40]
+        ratios += block
+        ratios_3d += [0.6] * len(block)
+    return series(label, ratios, ratios_3d)
+
+
+def v4_samples():
+    samples = fast_pinches("pincements_repetes") + fast_pinches("pincements_repetes_gauche")
+    samples += slow_profile_drift("va_et_vient_gauche") + slow_profile_drift("main_repos_profil")
+    add_closing_speeds(samples)
+    return samples
+
+
+def test_closing_speeds_are_recomputed_per_sequence():
+    samples = v4_samples()
+    fast = entry_moments(samples, "pincements_repetes", 0.25)
+    slow = entry_moments(samples, "va_et_vient_gauche", 0.25)
+    assert len(fast) == 3
+    assert len(slow) == 3
+    for s in fast:
+        assert s.closing_speed > 2.5  # 0,8 -> 0,2 en 200 ms environ
+    for s in slow:
+        assert s.closing_speed < 0.7  # 0,02 par image : environ 0,6 par seconde
+
+
+def test_entry_moments_need_a_real_crossing():
+    samples = series("pincements_repetes", [0.8, 0.1, 0.1, 0.1, None, 0.1, 0.8, 0.1])
+    # 0,8 -> 0,1 (1er) ; main perdue puis 0,1 (2e) ; 0,8 -> 0,1 (3e)
+    assert len(entry_moments(samples, "pincements_repetes", 0.25)) == 3
+
+
+def test_entry_separations_find_the_closing_speed():
+    separations = entry_separations(v4_samples(), 0.25)
+    by_name = {}
+    for sep in separations:
+        by_name[sep.descriptor] = sep
+    assert by_name["closing_speed"].higher_is_pinch
+    assert by_name["closing_speed"].proposal.youden_j == 1.0
+    assert by_name["pinch_ratio_3d"].higher_is_pinch is False  # vrais pincements plus fermés
+    assert by_name["pinch_ratio_3d"].proposal.youden_j == 1.0
+
+
+def test_entry_details_per_label():
+    details = entry_details(v4_samples(), ["va_et_vient_gauche"], 0.25)
+    assert details[0].count == 3
+    assert details[0].medians["pinch_ratio_3d"] == pytest.approx(0.6)
+
+
+def test_profile_metrics_compare_rules():
+    """Règle A : le pivot lent de profil fait de faux épisodes ; règle F (fermeture minimale)
+    les refuse, sans perdre les vrais pincements, au centre comme à gauche."""
+    samples = v4_samples()
+    thresholds = replace(T, min_closing_speed=1.5)
+    with_a = profile_metrics(samples, settings("A"), click_max_ms=400, seconds=1)
+    with_f = profile_metrics(samples, EpisodeSettings("F", thresholds, 0.40), 400, 1)
+    assert with_a.false_clicks + with_a.false_drags == 6
+    assert with_f.false_clicks + with_f.false_drags == 0
+    assert with_f.detected["pincements_repetes"][0] == 3
+    assert with_f.detected["pincements_repetes_gauche"][0] == 3
+    with_e = profile_metrics(samples, replace(settings("D"), measure="ratio3d"), 400, 1)
+    assert with_e.false_clicks + with_e.false_drags == 0  # en 3D, pas de contact
+
+
+def test_has_profile_data(train):
+    assert not has_profile_data(train)
+    assert has_profile_data(v4_samples())

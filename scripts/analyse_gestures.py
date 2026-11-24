@@ -23,19 +23,25 @@ from pathlib import Path
 from airdesk.config import load_config
 from airdesk.gesture_analysis import (
     DESCRIPTORS,
+    ENTRY_DESCRIPTORS,
     EPISODE_LABELS,
     NEGATIVE_LABELS,
     OUT_OF_VOCABULARY_LABELS,
     POSITIVE_LABEL,
     PROFILE_DESCRIPTORS,
     PROFILE_LABEL,
+    PROFILE_NEGATIVE_LABELS,
     EpisodeSettings,
     SweepRow,
     confusion,
     count_episodes,
     count_sequences,
     detection_rate,
+    entry_details,
+    entry_separations,
+    has_profile_data,
     labels_in_order,
+    profile_metrics,
     profile_separations,
     propose_hand_size_ratio,
     propose_thresholds,
@@ -57,7 +63,10 @@ SHORT_NAMES = {
     "main_relachee": "relachee",
     "parasites": "parasites",
     "main_repos_profil": "profil",
+    "main_repos_profil_gauche": "profil g.",
+    "va_et_vient_gauche": "va-vient",
     "pincements_repetes": "repetes",
+    "pincements_repetes_gauche": "repet. g.",
     "pincement_vers_camera": "hors voc.",
 }
 
@@ -315,6 +324,108 @@ def write_sweep_csv(path: Path, rows: list[SweepRow]) -> None:
             writer.writerow(line)
 
 
+LEFT_DETAIL_LABELS = EPISODE_LABELS + PROFILE_NEGATIVE_LABELS
+
+
+def cell(value) -> str:
+    return "     -" if value is None else f"{value:6.2f}"
+
+
+def closing_threshold(separations, descriptor: str) -> float:
+    """Seuil de vitesse de fermeture proposé par la comparaison au moment de l'entrée.
+
+    Retenu seulement si les vrais pincements se ferment PLUS vite (sens « valeur haute =
+    pincement ») ; sinon 0, c'est-à-dire sans effet.
+    """
+    for sep in separations:
+        if sep.descriptor == descriptor and sep.higher_is_pinch:
+            return sep.proposal.threshold
+    return 0.0
+
+
+def print_left_profile(train, test, learned: RuleThresholds, exit_: float, click_max_ms: float,
+                       seconds: int, test_seconds: int) -> None:
+    """Main tournée vers la gauche (protocole v4) : quel indice sépare les vrais pincements
+    du pivot de profil, et que donnent les règles A, D, E, F, F3D, D + paume ?"""
+    if not has_profile_data(train):
+        print("  Pas de séquence du protocole v4 (pincements_repetes_gauche, "
+              "main_repos_profil_gauche, va_et_vient_gauche) dans l'entraînement : enregistrer "
+              "une session v4 (python scripts/record_gestures.py).")
+        return
+    enter = learned.enter
+    print(f"  Passages de pinch_ratio sous enter ({enter}) et médianes des indices à ces "
+          "moments (entraînement) :")
+    header = f"    {'étiquette':<26} {'n':>4}"
+    for name in ENTRY_DESCRIPTORS:
+        header += f" {name:>16}"
+    print(header)
+    for detail in entry_details(train, LEFT_DETAIL_LABELS, enter):
+        line = f"    {detail.label:<26} {detail.count:>4}"
+        for name in ENTRY_DESCRIPTORS:
+            line += f" {cell(detail.medians[name]):>16}"
+        print(line)
+
+    separations = entry_separations(train, enter)
+    print("\n  Vrais pincements (répétés, centre et gauche) contre main de profil (repos et "
+          "va-et-vient), au moment de l'entrée, du meilleur indice au moins bon :")
+    for sep in separations:
+        p = sep.proposal
+        sense = ">" if sep.higher_is_pinch else "<"
+        verdict = "sépare" if p.margin > 0 else "chevauchement"
+        print(f"    {sep.descriptor:<17} pincement si {sense} {p.threshold:7.2f}   "
+              f"J={p.youden_j:4.2f}   marge {p.margin:+.2f}  {verdict}  "
+              f"(n={p.n_positives}/{p.n_negatives})")
+
+    min_closing = closing_threshold(separations, "closing_speed")
+    min_closing_3d = closing_threshold(separations, "closing_speed_3d")
+    print(f"\n  Seuils proposés : min_closing_speed = {min_closing:.2f}, "
+          f"min_closing_speed_3d = {min_closing_3d:.2f} (0 = pas de séparation dans le bon "
+          "sens)")
+
+    current = load_config(local_path=None).pinch
+    thresholds = replace(learned, min_closing_speed=min_closing,
+                         min_closing_speed_3d=min_closing_3d)
+    palm = replace(thresholds, require_palm_facing=True)
+    candidates = [
+        ("A", EpisodeSettings("A", thresholds, exit_, current.release_grace_ms,
+                              release_cancel_margin=current.release_cancel_margin)),
+        ("D", EpisodeSettings("D", thresholds, exit_, current.release_grace_ms,
+                              release_cancel_margin=current.release_cancel_margin)),
+        ("E (D, 3D)", EpisodeSettings("D", thresholds, exit_, current.release_grace_ms,
+                                      measure="ratio3d",
+                                      release_cancel_margin=current.release_cancel_margin)),
+        ("F", EpisodeSettings("F", thresholds, exit_, current.release_grace_ms,
+                              release_cancel_margin=current.release_cancel_margin)),
+        ("F3D", EpisodeSettings("F3D", thresholds, exit_, current.release_grace_ms,
+                                release_cancel_margin=current.release_cancel_margin)),
+        ("D + paume", EpisodeSettings("D", palm, exit_, current.release_grace_ms,
+                                      release_cancel_margin=current.release_cancel_margin)),
+    ]
+    print(f"\n  Épisodes (délai {current.release_grace_ms:g} ms, marge d'annulation "
+          f"{current.release_cancel_margin:g}, enter {enter} / exit {exit_}) ; cellules "
+          "entraînement / test :")
+    print(f"    {'règle':<11} | {'faux clics profil':<17} | {'faux gliss. profil':<18} | "
+          f"{'répétés':<13} | {'répétés gauche':<14}")
+    for name, settings in candidates:
+        tr = profile_metrics(train, settings, click_max_ms, seconds)
+        te = profile_metrics(test, settings, click_max_ms, test_seconds) if test else None
+
+        def repeated(m, label):
+            found, expected = m.detected[label]
+            return f"{found}/{expected}"
+
+        clicks = pair(tr.false_clicks, te.false_clicks if te else None)
+        drags = pair(tr.false_drags, te.false_drags if te else None)
+        center = pair(repeated(tr, "pincements_repetes"),
+                      repeated(te, "pincements_repetes") if te else None)
+        left = pair(repeated(tr, "pincements_repetes_gauche"),
+                    repeated(te, "pincements_repetes_gauche") if te else None)
+        print(f"    {name:<11} | {clicks:<17} | {drags:<18} | {center:<13} | {left:<14}")
+    print("    Faux clics / glisser profil : sur main_repos_profil, main_repos_profil_gauche et "
+          "va_et_vient_gauche. Une bonne règle : peu de faux épisodes, sans perdre les "
+          "pincements répétés à gauche.")
+
+
 def print_profile_comparison(samples, name: str) -> None:
     """Quel indice sépare le mieux la main au repos de profil des vrais pincements ?"""
     if PROFILE_LABEL not in labels_in_order(samples):
@@ -429,6 +540,11 @@ def main() -> None:
     print_profile_comparison(train, "entraînement")
     if test is not None:
         print_profile_comparison(test, "test")
+
+    title("Main tournée vers la gauche (protocole v4)")
+    test_seconds_v4 = test_settings.seconds if test_settings else settings.seconds
+    print_left_profile(train, test, learned, exit_, settings.click_max_ms, settings.seconds,
+                       test_seconds_v4)
 
     title("Garde-fou taille de main (appris sur l'entraînement)")
     print("Pincement maintenu après 1 s : images saines (pinch_ratio < exit) contre images")

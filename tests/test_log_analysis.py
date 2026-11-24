@@ -25,6 +25,7 @@ from airdesk.log_analysis import (
     OUTCOME_DRAG,
     OUTCOME_NONE,
     Row,
+    block_reason,
     percentile,
     pinch_durations,
     pinch_thresholds,
@@ -33,6 +34,7 @@ from airdesk.log_analysis import (
     still_periods,
     summarize,
     text_histogram,
+    timing_by_mode,
     wrist_speed_quartiles,
 )
 from airdesk.session_log import COLUMNS, SessionLog, build_metadata, event_names
@@ -180,6 +182,7 @@ class FakeFeatures:
     pinch_seg_68: float = 0.6
     palm_width: float = 0.8
     palm_facing: float = 1.0
+    pinch_ratio_3d: float = 0.8
 
 
 def test_event_names():
@@ -337,3 +340,48 @@ def test_session_log_round_trip(tmp_path):
     assert "airdesk_version" in saved
     assert saved["columns"] == COLUMNS
     assert pinch_thresholds(saved) == (0.25, 0.40, 300)
+
+
+def test_block_reason_of_a_refused_pinch():
+    """Pincement sans issue : la raison la plus fréquente pendant le pincement."""
+    rows = [
+        Row(0, True, 0.6, 4, "actif", [], 10.0, entry_block="ratio"),
+        Row(33, True, 0.2, 4, "actif", [], 10.0, entry_block="paume"),
+        Row(66, True, 0.1, 4, "actif", [], 10.0, entry_block="paume"),
+        Row(99, True, 0.1, 4, "actif", [], 10.0, entry_block="autres_doigts"),
+        Row(132, True, 0.6, 4, "actif", [], 10.0, entry_block="ratio"),
+    ]
+    assert block_reason(rows, 33, 99) == ("paume", 2, 3)
+
+
+def test_block_reason_is_none_for_old_logs():
+    rows = [Row(0, True, 0.1, 4, "actif", [], 10.0), Row(33, True, 0.1, 4, "actif", [], 10.0)]
+    assert block_reason(rows, 0, 33) is None
+
+
+def test_timing_by_mode():
+    rows = []
+    for i in range(20):
+        rows.append(Row(i * 33, True, 0.8, 4, "veille", [], 20.0 if i < 10 else 30.0,
+                        tracker_hands=2))
+    for i in range(20, 40):
+        rows.append(Row(i * 33, True, 0.8, 4, "actif", [], 9.0, tracker_hands=1))
+    modes = timing_by_mode(rows)
+    assert [m.hands for m in modes] == [1, 2]
+    one, two = modes
+    assert (one.frames, one.mean_ms, one.slow_share) == (20, 9.0, 0.0)
+    assert (two.frames, two.mean_ms, two.p95_ms, two.max_ms) == (20, 25.0, 30.0, 30.0)
+    assert two.slow_share == 0.5  # 10 images sur 20 au-dessus de 25 ms
+    assert timing_by_mode([Row(0, True, 0.8, 4, "actif", [], 9.0)]) == []
+
+
+def test_new_log_columns_round_trip(tmp_path):
+    cfg = load_config(tmp_path / "absent.yaml", local_path=None)
+    log = SessionLog(build_metadata(cfg, {}, git={"commit": None, "dirty": None}),
+                     folder=tmp_path, now=datetime(2026, 11, 24, 18, 0, 0))
+    with log:
+        log.write_frame(0, FakeFeatures(0.1, 4), "actif", [], 9.0, closing_speed=1.5,
+                        closing_speed_3d=1.2, entry_block="paume", tracker_hands=1)
+    row = read_log(log.csv_path)[0]
+    assert row.entry_block == "paume"
+    assert row.tracker_hands == 1

@@ -113,6 +113,7 @@ def features_for(open_palm: bool) -> HandFeatures:
         open_palm=open_palm, finger_extensions=extensions, index_extension=extension,
         folded_fingers=0, finger_extensions_3d=extensions, index_extension_3d=extension,
         folded_fingers_3d=0, pinch_seg=0.8, pinch_seg_68=0.8, palm_width=0.8, palm_facing=1.0,
+        pinch_ratio_3d=0.8,
     )
 
 

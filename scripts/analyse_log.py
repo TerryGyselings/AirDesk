@@ -23,6 +23,9 @@ from airdesk.log_analysis import (
     JITTER_GOAL_PX,
     JITTER_GOAL_WINDOW_MS,
     JITTER_WINDOWS_MS,
+    OUTCOME_NONE,
+    SLOW_FRAME_MS,
+    block_reason,
     frame_interval_ms,
     pinch_durations,
     pinch_thresholds,
@@ -32,6 +35,7 @@ from airdesk.log_analysis import (
     still_periods,
     summarize,
     text_histogram,
+    timing_by_mode,
     wrist_speed_quartiles,
 )
 from airdesk.session_log import LOG_DIR
@@ -95,6 +99,15 @@ def main() -> None:
         f"Traitement : {s.processing_mean_ms:.1f} ms en moyenne, "
         f"{s.processing_p95_ms:.1f} ms au 95e percentile"
     )
+    modes = timing_by_mode(rows)
+    if modes:
+        print("Traitement par mode MediaPipe (mains demandées) :")
+        for m in modes:
+            print(f"  {m.hands} main(s) : {m.frames:>5} images, moyenne {m.mean_ms:5.1f} ms, "
+                  f"P95 {m.p95_ms:5.1f} ms, max {m.max_ms:5.1f} ms, "
+                  f"{m.slow_share * 100:4.1f} % au-dessus de {SLOW_FRAME_MS:g} ms")
+    else:
+        print("Traitement par mode : colonne tracker_hands absente (log enregistré avant).")
     print(f"Événements : {s.clicks} clic(s), {s.drags} glisser\n")
 
     # Avec un délai de relâchement, le clic est émis après la fin mesurée sur pinch_ratio :
@@ -103,6 +116,11 @@ def main() -> None:
     pinches = pinch_durations(rows, enter, exit_, outcome_extra_ms)
     print(f"Pincements (d'après pinch_ratio, hystérésis {enter} / {exit_}) : {len(pinches)}"
           f" ; issue cherchée jusqu'à {outcome_extra_ms:.0f} ms après la fin")
+    has_entry_block = False
+    for row in rows:
+        if row.entry_block:
+            has_entry_block = True
+            break
     if pinches:
         print(f"{'début (ms)':>10} | {'durée':>7} | {'issue observée':<14} | {'fin':<11} | seuil")
     durations = []
@@ -114,6 +132,15 @@ def main() -> None:
             f"{p.start_ms:>10} | {p.duration_ms:>4} ms | {p.outcome:<14} | {p.ended_by:<11} | "
             f"{expected}"
         )
+        if p.outcome == OUTCOME_NONE:
+            # Pourquoi aucun clic ni glisser : raison de refus la plus fréquente pendant ce
+            # pincement (colonne entry_block, logs récents seulement).
+            blocked = block_reason(rows, p.start_ms, p.end_ms)
+            if blocked is not None:
+                reason, count, total = blocked
+                print(f"{'':>10}   -> refusé : {reason} ({count}/{total} images)")
+            elif not has_entry_block:
+                print(f"{'':>10}   -> raison inconnue (colonne entry_block absente de ce log)")
 
     print("\nDurée des pincements :")
     for line in text_histogram(durations, marker=click_max_ms, marker_label="click_max_ms"):

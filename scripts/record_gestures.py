@@ -36,6 +36,7 @@ from airdesk.interpretation.features import (
     normalize_landmarks,
     wrist_speed,
 )
+from airdesk.interpretation.pinch_rules import ClosingSpeed
 from airdesk.perception import HandTracker
 from airdesk.session_log import HAND_COLUMNS, build_metadata, hand_columns
 from airdesk.ui.debug_view import BONES
@@ -45,15 +46,21 @@ WINDOW_NAME = "AirDesk - enregistrement (q ou Echap pour arreter)"
 METRONOME_FLASH_MS = 300  # durée d'affichage de « PINCE ! » au début de chaque seconde
 # Version du protocole, notée dans le JSON : 2 = consigne du pincement maintenu précisée
 # (doigts collés, petits mouvements) et position / vitesse du poignet enregistrées ;
-# 3 = séquence négative « main_repos_profil » et colonnes palm_width / palm_facing.
-PROTOCOL_VERSION = 3
+# 3 = séquence négative « main_repos_profil » et colonnes palm_width / palm_facing ;
+# 4 = main tournée vers la GAUCHE de l'écran (pivot de l'avant-bras en pointage absolu) :
+#     pincements_repetes_gauche (positif), main_repos_profil_gauche et va_et_vient_gauche
+#     (négatifs) ; colonnes pinch_ratio_3d, closing_speed et closing_speed_3d.
+PROTOCOL_VERSION = 4
+VA_ET_VIENT_PERIOD_MS = 2000  # un aller-retour centre -> gauche -> centre toutes les 2 s
 
 
 @dataclass(frozen=True)
 class Sequence:
     label: str  # étiquette écrite dans le CSV
     instructions: tuple[str, ...]  # consigne affichée (sans accents : police OpenCV limitée)
-    metronome: bool = False  # « PINCE ! » une fois par seconde
+    # Indication rythmée : None, "pince" (« PINCE ! » une fois par seconde) ou
+    # "va_et_vient" (« ALLER » puis « RETOUR », un aller-retour toutes les 2 s).
+    cue: str | None = None
 
 
 SEQUENCES = [
@@ -61,7 +68,7 @@ SEQUENCES = [
     Sequence(
         "pincements_repetes",
         ("Pince pouce-index a chaque PINCE !", "puis relache bien entre deux."),
-        metronome=True,
+        cue="pince",
     ),
     Sequence(
         "pincement_maintenu",
@@ -78,9 +85,26 @@ SEQUENCES = [
          "Bouge un peu, sans montrer la paume."),
     ),
     Sequence(
+        "pincements_repetes_gauche",
+        ("Main placee comme pour viser la GAUCHE", "de l'ecran (avant-bras tourne) :",
+         "pince a chaque PINCE !"),
+        cue="pince",
+    ),
+    Sequence(
+        "main_repos_profil_gauche",
+        ("Main au repos, placee a GAUCHE", "(comme pour viser la gauche de l'ecran),",
+         "SANS pincer. Bouge un peu."),
+    ),
+    Sequence(
+        "va_et_vient_gauche",
+        ("SANS pincer : main du centre vers la", "GAUCHE de l'ecran puis retour,",
+         "un aller-retour toutes les 2 s."),
+        cue="va_et_vient",
+    ),
+    Sequence(
         "pincement_vers_camera",
         ("Index pointe VERS la camera :", "pince a chaque PINCE !"),
-        metronome=True,
+        cue="pince",
     ),
 ]
 
@@ -93,6 +117,9 @@ def dataset_columns() -> list[str]:
     # main par seconde : permet de vérifier si les décrochages arrivent pendant les gestes
     # rapides. Vitesse vide à la première image et après une perte de la main.
     columns += ["wrist_x", "wrist_y", "wrist_speed"]
+    # Vitesse de fermeture des doigts (baisse de pinch_ratio / pinch_ratio_3d par seconde,
+    # sur ~200 ms) : un vrai pincement rapproche activement les doigts.
+    columns += ["closing_speed", "closing_speed_3d"]
     for i in range(21):
         for axis in ("x", "y", "z"):
             columns.append(f"{axis}{i}")
@@ -112,7 +139,8 @@ def speed_since(hand, previous, timestamp_ms: int, aspect: float) -> float | Non
 
 
 def dataset_row(
-    label: str, t_ms: int, timestamp_ms: int, hand, features, aspect: float, speed=None
+    label: str, t_ms: int, timestamp_ms: int, hand, features, aspect: float, speed=None,
+    closing=None, closing_3d=None,
 ) -> list:
     """Une ligne du CSV : étiquette, descripteurs, poignet, 21 points normalisés.
 
@@ -123,11 +151,14 @@ def dataset_row(
     if hand is None:
         row.append("")
         row += ["", "", ""]
+        row += ["", ""]
         row += [""] * 63
         return row
     row.append(f"{features.hand_size:.4f}")
     wrist_x, wrist_y, _ = hand.landmarks[WRIST]
     row += [f"{wrist_x:.4f}", f"{wrist_y:.4f}", "" if speed is None else f"{speed:.3f}"]
+    row += ["" if closing is None else f"{closing:.3f}",
+            "" if closing_3d is None else f"{closing_3d:.3f}"]
     for x, y, z in normalize_landmarks(hand.landmarks, aspect):
         row += [f"{x:.4f}", f"{y:.4f}", f"{z:.4f}"]
     return row
@@ -164,8 +195,15 @@ def draw_overlay(image, hand, features, sequence, number, total, t_ms, duration_
         put_text(image, "REC", (w - 85, 32), 0.6, (0, 0, 255))
         # Barre de progression en bas de l'image.
         cv2.rectangle(image, (0, h - 8), (int(w * t_ms / duration_ms), h), (0, 0, 255), -1)
-        if sequence.metronome and t_ms % 1000 < METRONOME_FLASH_MS:
+        if sequence.cue == "pince" and t_ms % 1000 < METRONOME_FLASH_MS:
             put_text(image, "PINCE !", (w // 2 - 90, h // 2), 1.6, (0, 255, 255), 4)
+        elif sequence.cue == "va_et_vient":
+            if t_ms % VA_ET_VIENT_PERIOD_MS < VA_ET_VIENT_PERIOD_MS // 2:
+                put_text(image, "<- ALLER (gauche)", (w // 2 - 170, h // 2), 1.1,
+                         (0, 255, 255), 3)
+            else:
+                put_text(image, "RETOUR (centre) ->", (w // 2 - 170, h // 2), 1.1,
+                         (255, 200, 0), 3)
     else:
         remaining = (duration_ms - t_ms) // 1000 + 1
         put_text(image, "Prepare-toi...", (w // 2 - 90, h // 2 - 50), 0.8)
@@ -174,8 +212,8 @@ def draw_overlay(image, hand, features, sequence, number, total, t_ms, duration_
     if features is not None:
         put_text(
             image,
-            f"pince {features.pinch_ratio:.2f}  index {features.index_extension:.2f}"
-            f" (3D {features.index_extension_3d:.2f})  replies {features.folded_fingers}",
+            f"pince {features.pinch_ratio:.2f} (3D {features.pinch_ratio_3d:.2f})  "
+            f"paume {features.palm_width:.2f}  replies {features.folded_fingers}",
             (12, h - 20),
             0.5,
         )
@@ -188,6 +226,8 @@ def run_phase(frames, tracker, cfg, aspect, sequence, number, total, duration_ms
     """Affiche (et enregistre si `writer`) pendant `duration_ms`. False si l'utilisateur quitte."""
     start_ms = None
     previous = None  # (timestamp_ms, landmarks) de la dernière image avec main
+    closing = ClosingSpeed()
+    closing_3d = ClosingSpeed()
     for frame in frames:
         if start_ms is None:
             start_ms = frame.timestamp_ms
@@ -199,18 +239,24 @@ def run_phase(frames, tracker, cfg, aspect, sequence, number, total, duration_ms
         hand = hands[0] if hands else None
         features = None
         speed = None
+        closing_speed = None
+        closing_speed_3d = None
         if hand is not None:
             features = compute_features(
                 hand.landmarks, cfg.fingers.folded_below, cfg.fingers.folded_below_3d, aspect
             )
             speed = speed_since(hand, previous, frame.timestamp_ms, aspect)
             previous = (frame.timestamp_ms, hand.landmarks)
+            closing_speed = closing.update(frame.timestamp_ms, features.pinch_ratio)
+            closing_speed_3d = closing_3d.update(frame.timestamp_ms, features.pinch_ratio_3d)
         else:
-            previous = None  # après une perte de la main, la vitesse repart de zéro
+            previous = None  # après une perte de la main, les vitesses repartent de zéro
+            closing.reset()
+            closing_3d.reset()
         if writer is not None:
             writer.writerow(
                 dataset_row(sequence.label, t_ms, frame.timestamp_ms, hand, features, aspect,
-                            speed)
+                            speed, closing_speed, closing_speed_3d)
             )
 
         image = draw_overlay(
@@ -252,7 +298,8 @@ def main() -> None:
             "protocol_version": PROTOCOL_VERSION,
             "seconds": args.seconds,
             "countdown_s": args.countdown,
-            "metronome": "un PINCE ! par seconde dans les séquences à métronome",
+            "metronome": "un PINCE ! par seconde dans les séquences à métronome ; un "
+                         "aller-retour toutes les 2 s pour va_et_vient_gauche",
             "aspect": aspect,
             "landmarks": "x,y,z relatifs au poignet, unités homogènes (x et z multipliés par "
                          "aspect), divisés par la taille de main 2D",
@@ -262,7 +309,7 @@ def main() -> None:
         for seq in SEQUENCES:
             metadata["dataset"]["sequences"].append(
                 {"label": seq.label, "instructions": " ".join(seq.instructions),
-                 "metronome": seq.metronome}
+                 "cue": seq.cue}
             )
 
         DATASET_DIR.mkdir(parents=True, exist_ok=True)

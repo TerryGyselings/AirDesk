@@ -150,13 +150,17 @@ python scripts/analyse_log.py      # analyse le log le plus récent
 `--log` écrit dans `data/logs/` (ignoré par git) deux fichiers par session :
 
 - `AAAA-MM-JJ_HH-MM-SS.csv` : une ligne par image : horodatage, main présente, `pinch_ratio`,
-  doigts tendus, extension de chaque doigt en 2D et 3D, doigts repliés, état, événements émis,
-  temps de traitement. **Aucune image** (RGPD) ;
+  doigts tendus, extension de chaque doigt en 2D et 3D, doigts repliés, `pinch_ratio_3d`,
+  vitesse de fermeture des doigts (`closing_speed`, `closing_speed_3d`), état, événements
+  émis, temps de traitement, **`entry_block`** (pourquoi un pincement ne peut pas commencer :
+  `veille`, `hors_zone`, `ratio`, `paume`, `autres_doigts`...) et **`tracker_hands`** (1 ou
+  2 mains demandées à MediaPipe). **Aucune image** (RGPD) ;
 - `AAAA-MM-JJ_HH-MM-SS.json` : les réglages en vigueur (config complète fusionnée, version,
   commit git et modifications non commitées, système, caméra réellement ouverte).
 
-`analyse_log.py` affiche les images/s, le temps de traitement (moyenne et 95e percentile),
-le nombre de clics et de glisser, puis la durée de chaque pincement avec un histogramme texte
+`analyse_log.py` affiche les images/s, le temps de traitement (moyenne et 95e percentile,
+puis séparément en mode 1 main et 2 mains, pour localiser les pics), le nombre de clics et
+de glisser, pour chaque pincement sans issue la raison du refus (`entry_block`), puis la durée de chaque pincement avec un histogramme texte
 et la position de `click_max_ms`. Les durées sont calculées à partir de `pinch_ratio` et des
 seuils `enter`/`exit` lus dans le `.json` du log, et non à partir des états de la machine,
 qui dépendent justement de `click_max_ms`.
@@ -195,6 +199,12 @@ python scripts/analyse_gestures.py data/datasets/A.csv data/datasets/B.csv --tes
   Protocole v3 : séquence négative `main_repos_profil` (main détendue de côté, pouce contre
   l'index) et orientation de la paume (`palm_width`, `palm_facing`), pour régler
   `min_palm_width`.
+  Protocole v4 : main tournée vers la **gauche** de l'écran (en pointage absolu, l'avant-bras
+  pivote et la main passe de profil) : `pincements_repetes_gauche` (positif),
+  `main_repos_profil_gauche` et `va_et_vient_gauche` (négatifs, un aller-retour toutes les
+  2 s). L'analyse compare, au moment où les doigts passent sous `enter`, `pinch_ratio`,
+  `pinch_ratio_3d`, la vitesse de fermeture (2D et 3D) et `palm_width`, et les règles A, D,
+  E (D en 3D), F et F3D (D + fermeture minimale).
 - **Configuration en service** (`config/gestures.yaml`) : règle D, mesure `ratio`,
   enter 0,25 / exit 0,40, délai de relâchement 66 ms, sans sortie sur repli. `rule: A` et
   `release_grace_ms: 0` redonnent le comportement d'origine, pour comparer.

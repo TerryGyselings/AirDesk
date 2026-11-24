@@ -50,6 +50,7 @@ def features(
         pinch_seg_68=pinch_seg,
         palm_width=palm_width,
         palm_facing=palm_width / 0.8,
+        pinch_ratio_3d=pinch_ratio,
     )
 
 
@@ -454,3 +455,90 @@ def test_project_configuration_builds_a_machine():
     m = GestureStateMachine(cfg.engagement, cfg.pinch, cfg.fingers)
     assert m.pinch.rule in RULES
     assert m.pinch.measure in MEASURES
+
+
+# --- Clic devenu glisser (log 2026-11-24_18-19-43, 79 296 ms) ----------------------------------
+# pinch_ratio réel, image par image : pincement de 79 296 à 79 640 ms, puis relâchement lent
+# qui OSCILLE autour d'exit (0,40). Autres doigts ouverts (extension ≈ 1,05).
+REAL_RELEASE = [
+    (79218, 0.4835), (79265, 0.4474), (79296, 0.2498), (79343, 0.0984), (79390, 0.0807),
+    (79438, 0.0886), (79484, 0.1287), (79515, 0.2518), (79563, 0.3639), (79609, 0.3983),
+    (79640, 0.4035), (79688, 0.3969), (79718, 0.4014), (79765, 0.3970), (79813, 0.4069),
+    (79843, 0.4117), (79890, 0.3904), (79921, 0.4033), (79968, 0.4241), (80015, 0.4399),
+]
+
+
+def replay_real_release(release_cancel_margin):
+    pinch = PinchConfig(rule="D", release_grace_ms=66, click_max_ms=400,
+                        release_cancel_margin=release_cancel_margin)
+    m = GestureStateMachine(ENGAGEMENT, pinch, FINGERS)
+    activate(m)
+    events = []
+    for t, ratio in REAL_RELEASE:
+        events += m.update(t, features(pinch_ratio=ratio, extended_fingers=3, extension=1.05), P)
+    return events
+
+
+def test_real_click_of_344_ms_is_a_click_not_a_drag():
+    """Avec la marge : le relâchement commencé à 79 640 ms (344 ms) est confirmé malgré les
+    petits passages sous 0,40, et c'est un clic."""
+    events = replay_real_release(release_cancel_margin=0.05)
+    assert Click() in events
+    assert Press() not in events
+
+
+def test_real_case_without_the_margin_reproduces_the_bug():
+    """Sans marge (comportement d'origine), la même séquence donnait un glisser."""
+    events = replay_real_release(release_cancel_margin=0.0)
+    assert Press() in events
+    assert Click() not in events
+
+
+def test_no_press_while_a_release_is_being_confirmed():
+    """Relâchement commencé à 380 ms, confirmé 66 ms plus tard (446 ms > click_max 400) :
+    c'est un clic, la durée s'arrête au début du relâchement."""
+    pinch = PinchConfig(release_grace_ms=66, click_max_ms=400)
+    m = GestureStateMachine(ENGAGEMENT, pinch)
+    t = activate(m)
+    m.update(t, PINCH, P)
+    m.update(t + 350, PINCH, P)
+    assert m.update(t + 380, OPEN, P) == []  # relâchement en cours de confirmation
+    assert m.update(t + 413, OPEN, P) == []  # 413 ms > 400 : mais pas de Press
+    events = m.update(t + 446, OPEN, P)
+    assert events == [Click()]
+
+
+# --- Raison du refus d'entrée ------------------------------------------------------------------
+
+
+def test_entry_block_explains_each_situation():
+    m = machine_zone()
+    m.update(0, OPEN, IN)
+    assert m.entry_block == "veille"
+    t = activate_at(m, IN)
+    m.update(t, OPEN, IN)
+    assert m.entry_block == "ratio"  # doigts écartés
+    m.update(t + 33, PINCH, (0.50, 0.85))
+    assert m.entry_block == "hors_zone"
+    m.update(t + 66, PINCH, IN)
+    assert m.state == State.PINCHING
+    m.update(t + 99, PINCH, IN)
+    assert m.entry_block == "pincement_en_cours"
+
+
+def test_entry_block_names_the_rule_condition():
+    m = machine_d()
+    t = activate(m)
+    m.update(t, FIST_THUMB_ON_INDEX, P)
+    assert m.entry_block == "autres_doigts"
+
+
+def test_closing_speed_is_computed_by_the_machine():
+    m = new_machine()
+    t = activate(m)
+    m.update(t, features(pinch_ratio=0.8, extended_fingers=4, extension=1.5), P)
+    m.update(t + 100, features(pinch_ratio=0.6, extended_fingers=4, extension=1.5), P)
+    m.update(t + 200, features(pinch_ratio=0.4, extended_fingers=4, extension=1.5), P)
+    assert m.closing_speed == pytest.approx(2.0)
+    m.update(t + 233, None, None)  # main perdue : historique effacé
+    assert m.closing_speed is None

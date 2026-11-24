@@ -25,7 +25,12 @@ from enum import Enum
 
 from airdesk.config import EngagementConfig, FingersConfig, PinchConfig, PointerConfig
 from airdesk.interpretation.features import HandFeatures
-from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_measure
+from airdesk.interpretation.pinch_rules import (
+    ClosingSpeed,
+    PinchHysteresis,
+    RuleThresholds,
+    pinch_measure,
+)
 from airdesk.interpretation.pointing import below_zone, in_zone, zone_to_screen
 
 
@@ -108,10 +113,22 @@ class GestureStateMachine:
             folded_below_3d=fingers.folded_below_3d,
             require_palm_facing=pinch.require_palm_facing,
             min_palm_width=pinch.min_palm_width,
+            min_closing_speed=pinch.min_closing_speed,
+            min_closing_speed_3d=pinch.min_closing_speed_3d,
         )
         self._pinch_detector = PinchHysteresis(
-            pinch.rule, thresholds, pinch.exit, pinch.release_grace_ms, pinch.exit_on_fold
+            pinch.rule, thresholds, pinch.exit, pinch.release_grace_ms, pinch.exit_on_fold,
+            pinch.release_cancel_margin,
         )
+        # Vitesse de fermeture des doigts (règles F / F3D, et colonnes du log).
+        self._closing = ClosingSpeed()
+        self._closing_3d = ClosingSpeed()
+        self.closing_speed: float | None = None
+        self.closing_speed_3d: float | None = None
+        # Pourquoi un pincement ne peut pas commencer à cette image (colonne entry_block du
+        # log) : "veille", "hors_zone", "pincement_en_cours", ou la raison de la règle
+        # ("ratio", "paume", "autres_doigts"...) ; "" si l'entrée est possible.
+        self.entry_block = ""
         self._arm_start_ms: float | None = None
         self._pinch_start_ms: float = 0.0
         self._last_seen_ms: float | None = None
@@ -132,6 +149,11 @@ class GestureStateMachine:
         if features is None or pointer is None:
             self._arm_start_ms = None
             self._prev_pointer = None
+            self._closing.reset()
+            self._closing_3d.reset()
+            self.closing_speed = None
+            self.closing_speed_3d = None
+            self.entry_block = ""
             lost_for = 0.0
             if self._last_seen_ms is not None:
                 lost_for = t_ms - self._last_seen_ms
@@ -144,12 +166,15 @@ class GestureStateMachine:
             return events
 
         self._last_seen_ms = t_ms
+        self.closing_speed = self._closing.update(t_ms, features.pinch_ratio)
+        self.closing_speed_3d = self._closing_3d.update(t_ms, features.pinch_ratio_3d)
 
         zone = self.pointer.zone
         inside = in_zone(pointer[0], pointer[1], zone)
 
         # --- Veille : on attend une main ouverte maintenue (dans la zone, si demandé) ---
         if self.state == State.IDLE:
+            self.entry_block = "veille"
             arming = features.open_palm
             if self.engagement.activate_in_zone and not inside:
                 arming = False  # main ouverte posée en bas, hors zone : ce n'est pas un appel
@@ -178,6 +203,7 @@ class GestureStateMachine:
                 self._below_since_ms = None
                 self._arm_start_ms = None
                 self._pinch_detector.reset()
+                self.entry_block = "veille"
                 return events
         else:
             self._below_since_ms = None
@@ -201,14 +227,23 @@ class GestureStateMachine:
         # déjà commencé dans la zone continue, pour ne pas lâcher un glisser vers un bord.
         pinch_event = None
         may_start = inside or not self.pinch.only_in_zone
-        if self._pinch_detector.pinched or may_start:
+        already_pinched = self._pinch_detector.pinched
+        if already_pinched or may_start:
             pinch_event = self._pinch_detector.update(
                 t_ms,
                 pinch_measure(features, self.pinch.measure),
                 features.finger_extensions,
                 features.finger_extensions_3d,
                 features.palm_width,
+                self.closing_speed,
+                self.closing_speed_3d,
             )
+        if already_pinched:
+            self.entry_block = "pincement_en_cours"
+        elif not may_start:
+            self.entry_block = "hors_zone"
+        else:
+            self.entry_block = self._pinch_detector.last_block or ""
 
         if self.state == State.ACTIVE:
             if pinch_event == "start":
@@ -219,6 +254,11 @@ class GestureStateMachine:
             if pinch_event == "end":
                 events.append(Click())
                 self.state = State.ACTIVE
+            elif self._pinch_detector.releasing:
+                # Relâchement en cours de confirmation (release_grace_ms) : pas de Press. La
+                # durée du pincement s'arrête au DÉBUT du relâchement ; s'il est confirmé, c'est
+                # un clic, même si la confirmation fait dépasser click_max_ms.
+                pass
             elif t_ms - self._pinch_start_ms > self.pinch.click_max_ms:
                 events.append(Press())
                 self.state = State.DRAGGING

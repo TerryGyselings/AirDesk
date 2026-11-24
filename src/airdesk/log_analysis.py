@@ -29,6 +29,8 @@ class Row:
     # Colonnes ajoutées plus tard (absentes des anciens logs) :
     wrist_speed: float | None = None  # tailles de main par seconde
     cursor: tuple[int, int] | None = None  # position calculée du curseur (pointage absolu)
+    entry_block: str = ""  # pourquoi un pincement ne pouvait pas commencer ("" : il le pouvait)
+    tracker_hands: int | None = None  # mains demandées à MediaPipe (1 ou 2)
 
 
 def optional_float(record: dict, name: str) -> float | None:
@@ -69,6 +71,9 @@ def read_log(path: Path) -> list[Row]:
                     processing_ms=float(record["processing_ms"]),
                     wrist_speed=optional_float(record, "wrist_speed"),
                     cursor=cursor,
+                    entry_block=record.get("entry_block") or "",
+                    tracker_hands=int(record["tracker_hands"]) if record.get("tracker_hands")
+                    else None,
                 )
             )
     return rows
@@ -339,6 +344,62 @@ def pinch_durations(
                     events_seen.append(name)
         pinches.append(Pinch(start, end, outcome_of(events_seen), ended_by))
     return pinches
+
+
+def block_reason(rows: list[Row], start_ms: int, end_ms: int) -> tuple[str, int, int] | None:
+    """Raison la plus fréquente du refus d'entrée pendant un pincement : (raison, images
+    concernées, images du pincement). None si le log n'a pas la colonne entry_block (ancien
+    format) ou si rien n'a bloqué."""
+    counts: dict[str, int] = {}
+    total = 0
+    has_column = False
+    for row in rows:
+        if start_ms <= row.timestamp_ms <= end_ms and row.hand_present:
+            total += 1
+            if row.entry_block:
+                has_column = True
+                counts[row.entry_block] = counts.get(row.entry_block, 0) + 1
+    if not has_column or not counts:
+        return None
+    best = None
+    for reason, count in counts.items():
+        if best is None or count > counts[best]:
+            best = reason
+    return best, counts[best], total
+
+
+@dataclass
+class ModeTiming:
+    """Temps de traitement des images traitées avec 1 ou 2 mains demandées à MediaPipe."""
+
+    hands: int
+    frames: int
+    mean_ms: float
+    p95_ms: float
+    max_ms: float
+    slow_share: float  # part des images au-dessus de SLOW_FRAME_MS
+
+
+SLOW_FRAME_MS = 25.0  # une image qui prend plus de 25 ms fait perdre de la fluidité
+
+
+def timing_by_mode(rows: list[Row]) -> list[ModeTiming]:
+    """Temps de traitement séparé par mode (1 main / 2 mains), pour trouver d'où viennent les
+    pics. Vide pour un log sans la colonne tracker_hands."""
+    by_mode: dict[int, list[float]] = {}
+    for row in rows:
+        if row.tracker_hands is not None:
+            by_mode.setdefault(row.tracker_hands, []).append(row.processing_ms)
+    result = []
+    for hands in sorted(by_mode):
+        values = by_mode[hands]
+        slow = 0
+        for v in values:
+            if v > SLOW_FRAME_MS:
+                slow += 1
+        result.append(ModeTiming(hands, len(values), sum(values) / len(values),
+                                 percentile(values, 95), max(values), slow / len(values)))
+    return result
 
 
 def outcome_of(events: list[str]) -> str:

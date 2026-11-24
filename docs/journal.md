@@ -264,3 +264,43 @@ Analyses et décisions :
   - **afficher un avertissement** dans la fenêtre de debug (et pendant l'étalonnage) quand
     la main sort par le bas de l'image, ou quand le poignet s'approche du bord bas ;
   - reprendre ensuite l'étalonnage guidé de la branche, une fois la caméra bien placée.
+
+## 2026-11-24 — Essai réel complet ; clic devenu glisser ; main qui pivote vers la gauche
+
+Retour d'usage de P01 (logs 18-19-43 et 18-22-34, commit fb6d299) :
+- **OK** : activation, glisser de fenêtre (7/7), croix de fermeture, main baissée = veille,
+  poings, gestes parasites, main gauche ignorée. Tremblement médian **1,43 px** sur 1 s
+  (objectif < 2 px atteint ; maximum 4,97 px).
+- **Constat clé : le pivot de la main vers la gauche.** En pointage absolu, quand la main
+  droite va vers la GAUCHE de l'écran, l'avant-bras pivote et la main se retrouve de profil ;
+  elle fait alors des clics / pincements involontaires, comme la main au repos de profil. La
+  condition sur la paume (palm_width) ne peut donc pas être la solution : elle refuse aussi
+  les vrais clics à gauche. Preuve, log 18-19-43 à 82 515 ms : vrai clic à gauche (curseur
+  x ≈ 290 px) refusé par la paume (palm_width 0,06-0,15 < 0,22). **`require_palm_facing`
+  désactivé.**
+- **Clic devenu glisser (79 296 ms, 344 ms < click_max_ms 400).** Cause : en relâchant
+  lentement, pinch_ratio oscille autour d'exit (0,3983, 0,4035, 0,3969, 0,4014, 0,3970...) ;
+  chaque passage juste sous 0,40 annulait la confirmation du relâchement (66 ms), et le Press
+  partait à 422 ms. Corrections : (1) pas de Press pendant qu'un relâchement est en cours de
+  confirmation, la durée s'arrêtant au début du relâchement ; (2) un relâchement en cours
+  n'est annulé que si la mesure redescend sous exit − 0,05 (`release_cancel_margin`). La
+  correction (1) seule ne suffisait pas sur ce cas réel (Press à 469 ms) ; avec (2), la
+  séquence réelle donne bien un clic (testé). Contrepartie : pendant un glisser, laisser la
+  mesure filer juste au-dessus de 0,40 puis revenir à 0,36 ne rattrape plus le glisser.
+- **Pincements refusés sans explication** : 82 515 ms = paume (ci-dessus) ; 95 515 ms =
+  AirDesk en veille (main sous la zone). Nouvelle colonne `entry_block` du log, et raison
+  affichée par analyse_log.py pour chaque pincement sans issue.
+- **Performances** : 24 i/s (caméra), 12,5 ms en moyenne mais 26,6 ms au 95e percentile.
+  Colonne `tracker_hands` (1 ou 2 mains demandées) et temps par mode dans analyse_log.py pour
+  localiser les pics (hypothèse : images en mode 2 mains, en veille ou après une perte).
+- **Hypothèse pour la main de profil**, à tester avec la session v4 :
+  - de profil, le pouce passe DEVANT l'index vu de la caméra : pinch_ratio en 2D voit un
+    contact qui n'existe pas en profondeur → `pinch_ratio_3d` (z mis à l'échelle de x,
+    divisé par la taille de main 3D) ;
+  - un vrai pincement FERME activement les doigts, un pivot non → `closing_speed` (baisse de
+    pinch_ratio par seconde sur ~200 ms) et `closing_speed_3d` ;
+  - règles candidates E (= D avec pinch_ratio_3d), F (= D + closing_speed minimale) et F3D.
+    Non branchées : décision après la session v4.
+- Protocole v4 : `pincements_repetes_gauche` (positif), `main_repos_profil_gauche` et
+  `va_et_vient_gauche` (négatifs, un aller-retour centre ↔ gauche toutes les 2 s, le geste qui
+  provoque les faux clics en réel).

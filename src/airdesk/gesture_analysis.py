@@ -23,19 +23,33 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
-from airdesk.interpretation.features import palm_facing, palm_width, pinch_segment
-from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_candidate
+from airdesk.interpretation.features import (
+    palm_facing,
+    palm_width,
+    pinch_ratio_3d,
+    pinch_segment,
+)
+from airdesk.interpretation.pinch_rules import (
+    ClosingSpeed,
+    PinchHysteresis,
+    RuleThresholds,
+    pinch_candidate,
+)
 from airdesk.interpretation.quality import HandSizeGuard
 from airdesk.stats import percentile
 
 POSITIVE_LABEL = "pincement_maintenu"
 NEGATIVE_LABELS = ["main_ouverte", "poing", "poing_ouvre_ferme", "main_relachee", "parasites",
-                   "main_repos_profil"]
+                   "main_repos_profil", "main_repos_profil_gauche", "va_et_vient_gauche"]
 # Négatifs dont on compte les faux épisodes (la main ouverte sert à l'engagement, elle est
-# vue à part dans la matrice image par image). main_repos_profil : protocole v3 et suivants.
+# vue à part dans la matrice image par image). main_repos_profil : protocole v3 et suivants ;
+# main_repos_profil_gauche et va_et_vient_gauche : protocole v4.
 FALSE_EPISODE_LABELS = ["poing", "poing_ouvre_ferme", "main_relachee", "parasites",
-                        "main_repos_profil"]
-EPISODE_LABELS = ["pincements_repetes"]
+                        "main_repos_profil", "main_repos_profil_gauche", "va_et_vient_gauche"]
+# Pincements au métronome (un par seconde) : au centre, et main tournée vers la gauche (v4).
+EPISODE_LABELS = ["pincements_repetes", "pincements_repetes_gauche"]
+# Main de profil (repos ou pivot vers la gauche) : la cible des règles E et F.
+PROFILE_NEGATIVE_LABELS = ["main_repos_profil", "main_repos_profil_gauche", "va_et_vient_gauche"]
 OUT_OF_VOCABULARY_LABELS = ["pincement_vers_camera"]
 SETTLE_MS = 1000  # début de « pincement_maintenu » ignoré (mise en place du geste)
 LOST_TIMEOUT_MS = 1000  # comme engagement.lost_timeout_ms de la machine à états
@@ -63,6 +77,12 @@ class Sample:
     palm_facing: float | None = None
     # Hauteur du poignet dans l'image (0 = haut, 1 = bas), protocole v2 et suivants.
     wrist_y: float | None = None
+    # Distance pouce-index en 3D, recalculée à partir des 21 points (v1 compris).
+    pinch_ratio_3d: float | None = None
+    # Vitesse de fermeture des doigts (baisse par seconde sur ~200 ms) de pinch_ratio et de
+    # pinch_ratio_3d, recalculée sur la série de chaque prise (voir add_closing_speeds).
+    closing_speed: float | None = None
+    closing_speed_3d: float | None = None
 
     @property
     def hand_present(self) -> bool:
@@ -73,6 +93,8 @@ def measure_value(s: Sample, measure: str) -> float:
     """Valeur de la mesure de pincement choisie (voir pinch_rules.MEASURES)."""
     if measure == "ratio":
         value = s.pinch_ratio
+    elif measure == "ratio3d":
+        value = s.pinch_ratio_3d
     elif measure == "seg78":
         value = s.pinch_seg
     elif measure == "seg68":
@@ -117,6 +139,7 @@ def read_dataset(path: Path) -> list[Sample]:
             pinch_seg_68 = None
             width = None
             facing = None
+            ratio_3d = None
             points = landmarks_from_record(record)
             if points is not None:
                 # Points déjà relatifs au poignet, en unités homogènes et divisés par la
@@ -125,6 +148,9 @@ def read_dataset(path: Path) -> list[Sample]:
                 pinch_seg_68 = pinch_segment(points, 6)
                 width = palm_width(points)
                 facing = palm_facing(points)
+                ratio_3d = pinch_ratio_3d(points)
+            elif record.get("pinch_ratio_3d"):
+                ratio_3d = float(record["pinch_ratio_3d"])  # colonne directe (v4)
             samples.append(
                 Sample(
                     label=record["label"],
@@ -138,9 +164,37 @@ def read_dataset(path: Path) -> list[Sample]:
                     palm_width=width,
                     palm_facing=facing,
                     wrist_y=float(record["wrist_y"]) if record.get("wrist_y") else None,
+                    pinch_ratio_3d=ratio_3d,
                 )
             )
+    add_closing_speeds(samples)
     return samples
+
+
+def add_closing_speeds(samples: list[Sample]) -> None:
+    """Calcule closing_speed et closing_speed_3d image par image, comme en direct.
+
+    Même calcul que la machine à états (pinch_rules.ClosingSpeed, fenêtre de 200 ms) : on
+    repart de zéro à chaque nouvelle prise (t_in_sequence_ms qui recule) et après une image
+    sans main.
+    """
+    closing = ClosingSpeed()
+    closing_3d = ClosingSpeed()
+    previous_label = None
+    previous_t = -1
+    for s in samples:
+        if s.label != previous_label or s.t_in_sequence_ms < previous_t:
+            closing.reset()
+            closing_3d.reset()
+        previous_label = s.label
+        previous_t = s.t_in_sequence_ms
+        if not s.hand_present:
+            closing.reset()
+            closing_3d.reset()
+            continue
+        s.closing_speed = closing.update(s.t_in_sequence_ms, s.pinch_ratio)
+        if s.pinch_ratio_3d is not None:
+            s.closing_speed_3d = closing_3d.update(s.t_in_sequence_ms, s.pinch_ratio_3d)
 
 
 def labels_in_order(samples: list[Sample]) -> list[str]:
@@ -355,6 +409,7 @@ class EpisodeSettings:
     lost_timeout_ms: float = LOST_TIMEOUT_MS
     measure: str = "ratio"
     exit_on_fold: bool = False
+    release_cancel_margin: float = 0.0
 
     def describe(self) -> str:
         fold = ", sortie si repli" if self.exit_on_fold else ""
@@ -375,7 +430,7 @@ def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list
     """
     hysteresis = PinchHysteresis(
         settings.rule, settings.thresholds, settings.exit, settings.release_grace_ms,
-        settings.exit_on_fold,
+        settings.exit_on_fold, settings.release_cancel_margin,
     )
     guard = HandSizeGuard(settings.guard_ratio, settings.window_ms)
     episodes: list[Episode] = []
@@ -398,7 +453,8 @@ def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list
 
         last_seen_ms = t
         value = measure_value(s, settings.measure)
-        event = hysteresis.update(t, value, s.extensions, s.extensions_3d, s.palm_width)
+        event = hysteresis.update(t, value, s.extensions, s.extensions_3d, s.palm_width,
+                                  s.closing_speed, s.closing_speed_3d)
         if event == "start":
             start_ms = t
         elif event == "end":
@@ -842,3 +898,140 @@ def thresholds_from_proposals(
             values[name] = proposal.threshold
     return RuleThresholds(enter=current.enter, require_palm_facing=current.require_palm_facing,
                           **values)
+
+
+# --- Main de profil vers la gauche (protocole v4) -----------------------------------------------
+#
+# Usage réel : en pointage absolu, la main droite qui vise la GAUCHE de l'écran pivote avec
+# l'avant-bras et passe de profil ; elle fait alors de faux pincements, comme la main au repos
+# de profil. Hypothèses : en 3D, pouce et index ne se touchent pas (pinch_ratio_3d) ; et un
+# vrai pincement FERME activement les doigts (closing_speed), un pivot non.
+
+ENTRY_DESCRIPTORS = ["pinch_ratio", "pinch_ratio_3d", "closing_speed", "closing_speed_3d",
+                     "palm_width"]
+
+
+def entry_value(name: str, s: Sample) -> float | None:
+    if name == "pinch_ratio":
+        return s.pinch_ratio
+    if name == "pinch_ratio_3d":
+        return s.pinch_ratio_3d
+    if name == "closing_speed":
+        return s.closing_speed
+    if name == "closing_speed_3d":
+        return s.closing_speed_3d
+    if name == "palm_width":
+        return s.palm_width
+    raise ValueError(f"Descripteur inconnu : {name}")
+
+
+def entry_moments(samples: list[Sample], label: str, enter: float) -> list[Sample]:
+    """Images où pinch_ratio PASSE sous `enter` (le moment où la règle A entrerait).
+
+    On compare les descripteurs à ces moments plutôt qu'image par image : la vitesse de
+    fermeture n'a de sens qu'au moment où les doigts se rapprochent.
+    """
+    moments = []
+    for sequence in split_sequences(samples, label):
+        above = True  # au début de la prise, on considère les doigts écartés
+        for s in sequence:
+            if not s.hand_present:
+                above = True
+                continue
+            if s.pinch_ratio < enter:
+                if above:
+                    moments.append(s)
+                above = False
+            else:
+                above = True
+    return moments
+
+
+def entry_values(moments: list[Sample], name: str) -> list[float]:
+    values = []
+    for s in moments:
+        value = entry_value(name, s)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def entry_separations(samples: list[Sample], enter: float) -> list[Separation]:
+    """Vrais pincements (répétés, au centre et à gauche) contre main de profil (repos et
+    va-et-vient), au moment de l'entrée ; du meilleur indice (Youden) au moins bon."""
+    pinch_moments = []
+    for label in EPISODE_LABELS:
+        pinch_moments += entry_moments(samples, label, enter)
+    profile_moments = []
+    for label in PROFILE_NEGATIVE_LABELS:
+        profile_moments += entry_moments(samples, label, enter)
+    results = []
+    for name in ENTRY_DESCRIPTORS:
+        separation = best_separation(name, entry_values(pinch_moments, name),
+                                     entry_values(profile_moments, name))
+        if separation is not None:
+            results.append(separation)
+
+    def youden_of(separation: Separation) -> float:
+        return separation.proposal.youden_j
+
+    results.sort(key=youden_of, reverse=True)
+    return results
+
+
+@dataclass
+class EntryDetail:
+    """Passages sous enter d'une étiquette, et médianes des indices à ces moments."""
+
+    label: str
+    count: int
+    medians: dict[str, float | None]
+
+
+def entry_details(samples: list[Sample], labels: list[str], enter: float) -> list[EntryDetail]:
+    details = []
+    for label in labels:
+        moments = entry_moments(samples, label, enter)
+        medians: dict[str, float | None] = {}
+        for name in ENTRY_DESCRIPTORS:
+            values = entry_values(moments, name)
+            medians[name] = statistics.median(values) if values else None
+        details.append(EntryDetail(label, len(moments), medians))
+    return details
+
+
+@dataclass
+class ProfileMetrics:
+    """Ce que donne une règle face à la main de profil."""
+
+    false_clicks: int  # sur main_repos_profil, main_repos_profil_gauche, va_et_vient_gauche
+    false_drags: int
+    detected: dict[str, tuple[int, int]]  # pincements répétés : (détectés, attendus)
+
+
+def profile_metrics(
+    samples: list[Sample], settings: EpisodeSettings, click_max_ms: float, seconds: int
+) -> ProfileMetrics:
+    clicks = 0
+    drags = 0
+    for label in PROFILE_NEGATIVE_LABELS:
+        for sequence in split_sequences(samples, label):
+            for e in simulate_sequence(sequence, settings):
+                if e.duration_ms <= click_max_ms:
+                    clicks += 1
+                else:
+                    drags += 1
+    detected = {}
+    for label in EPISODE_LABELS:
+        sequences = split_sequences(samples, label)
+        found = 0
+        for sequence in sequences:
+            found += len(simulate_sequence(sequence, settings))
+        detected[label] = (found, seconds * len(sequences))
+    return ProfileMetrics(clicks, drags, detected)
+
+
+def has_profile_data(samples: list[Sample]) -> bool:
+    """Vrai si le jeu de données contient au moins une séquence du protocole v4."""
+    labels = labels_in_order(samples)
+    return "pincements_repetes_gauche" in labels or "va_et_vient_gauche" in labels

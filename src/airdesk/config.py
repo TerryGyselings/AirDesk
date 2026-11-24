@@ -52,6 +52,12 @@ class PinchConfig:
     min_palm_width: float = 0.0
     # Un pincement ne peut commencer que si le point de pointage est dans la zone.
     only_in_zone: bool = False
+    # Un relâchement en cours n'est annulé que si la mesure redescend sous exit - cette marge
+    # (0 = comportement d'origine). Voir PinchHysteresis.
+    release_cancel_margin: float = 0.0
+    # Règles F / F3D (non branchées) : vitesse de fermeture minimale des doigts.
+    min_closing_speed: float = 0.0
+    min_closing_speed_3d: float = 0.0
 
 
 @dataclass(frozen=True)

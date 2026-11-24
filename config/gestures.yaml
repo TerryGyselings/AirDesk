@@ -35,14 +35,26 @@ pinch:
   # Le pincement n'est relâché que si la condition de sortie tient pendant ce temps (ms).
   # 0 = relâchement immédiat. 66 ms = 2 images à 30 i/s.
   release_grace_ms: 66
+  # Un relâchement en cours n'est annulé que si la mesure redescend sous exit - marge.
+  # Sans marge, un relâchement lent qui oscille autour d'exit (0,398 / 0,404 / 0,397...)
+  # était annulé à chaque passage juste sous 0,40, et un clic de 344 ms devenait un glisser
+  # (log 18-19-43, 79 296 ms).
+  release_cancel_margin: 0.05
+  # Règles candidates F / F3D (vitesse de fermeture des doigts) : pas encore branchées,
+  # à régler avec la session v4 (scripts/analyse_gestures.py).
+  min_closing_speed: 0.0
+  min_closing_speed_3d: 0.0
   # Mesure comparée à enter / exit : ratio (pouce -> bout de l'index), seg78 / seg68
   # (pouce -> segment 7-8 ou 6-8 de l'index). enter / exit doivent être réglés pour elle.
   measure: ratio
   # Sortir aussi du pincement quand les autres doigts se replient (règles C, D...).
   exit_on_fold: false
-  # Entrée en pincement seulement si la paume fait face à la caméra : une main au repos
-  # de profil (pouce contre l'index) ne déclenche plus de clic.
-  require_palm_facing: true
+  # Entrée en pincement seulement si la paume fait face à la caméra.
+  # DÉSACTIVÉ le 2026-11-24 : en pointage absolu, la main qui vise la GAUCHE de l'écran
+  # pivote et passe de profil ; la condition refusait alors les vrais clics. Preuve : log
+  # 18-19-43, 82 515 ms, vrai clic à gauche (curseur x ≈ 290 px) refusé avec palm_width
+  # 0,06-0,15 < 0,22. Pistes à l'étude (session v4) : pinch_ratio_3d, vitesse de fermeture.
+  require_palm_facing: false
   # Largeur apparente minimale de la paume (base index 5 -> base auriculaire 17, divisée par
   # la taille de main). PROVISOIRE, en attendant les mesures (séquence main_repos_profil) :
   # - main synthétique : de face 0,80, tournée de 60° 0,40, de profil (80°) 0,14 ;

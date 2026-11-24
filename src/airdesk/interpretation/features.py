@@ -64,6 +64,10 @@ class HandFeatures:
     # au repos est souvent de profil, et la paume paraît alors étroite.
     palm_width: float  # distance base index (5) -> base auriculaire (17) / taille de main
     palm_facing: float  # |composante z| de la normale à la paume : 1 = de face, 0 = de profil
+    # Distance pouce-index en 3D (avec la profondeur z), divisée par la taille de main 3D.
+    # Hypothèse (usage réel) : main de profil, le pouce passe DEVANT l'index pour la caméra :
+    # en 2D ils semblent se toucher, en profondeur ils restent séparés.
+    pinch_ratio_3d: float
 
 
 def distance_2d(a: Point, b: Point) -> float:
@@ -200,6 +204,18 @@ def palm_facing(homogeneous: list[Point]) -> float:
     return abs(nz) / length
 
 
+def pinch_ratio_3d(homogeneous: list[Point]) -> float:
+    """Distance 3D bout du pouce -> bout de l'index / taille de main 3D (unités homogènes).
+
+    Fonctionne aussi sur des points déjà normalisés (jeux de données) : le rapport ne dépend
+    pas de l'échelle.
+    """
+    hand_size = distance_3d(homogeneous[WRIST], homogeneous[MIDDLE_MCP])
+    if hand_size < 1e-6:
+        hand_size = 1e-6
+    return distance_3d(homogeneous[THUMB_TIP], homogeneous[INDEX_TIP]) / hand_size
+
+
 def wrist_speed(
     landmarks: list[Point], previous_landmarks: list[Point], dt_s: float, aspect: float = 1.0
 ) -> float | None:
@@ -287,4 +303,5 @@ def compute_features(
         pinch_seg_68=pinch_segment(homogeneous, 6),
         palm_width=palm_width(homogeneous),
         palm_facing=palm_facing(homogeneous),
+        pinch_ratio_3d=pinch_ratio_3d(homogeneous),
     )

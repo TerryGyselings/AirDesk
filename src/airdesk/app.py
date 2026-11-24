@@ -175,6 +175,10 @@ def run(
                     logger.write_frame(
                         frame.timestamp_ms, features, machine.state.value, events,
                         processing_ms, wrist=wrist, wrist_speed=speed, cursor=cursor,
+                        closing_speed=machine.closing_speed,
+                        closing_speed_3d=machine.closing_speed_3d,
+                        entry_block=machine.entry_block,
+                        tracker_hands=2 if search_two else 1,
                     )
 
                 if show_preview:

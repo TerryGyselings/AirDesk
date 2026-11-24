@@ -7,6 +7,7 @@ from airdesk.interpretation.features import (
     count_folded,
     normalize_landmarks,
     palm_center,
+    pinch_ratio_3d,
     point_segment_distance,
     wrist_speed,
 )
@@ -270,3 +271,27 @@ def test_normalize_landmarks_puts_wrist_at_origin_and_hand_size_at_one():
     for i in range(21):
         for axis in range(3):
             assert abs(normalized[i][axis] - normalized_small[i][axis]) < 1e-9
+
+
+def test_pinch_ratio_3d_equals_2d_for_a_flat_hand():
+    hand = make_hand(fingers_extended=True, pinch=False)
+    f = compute_features(hand)
+    assert f.pinch_ratio_3d == pytest.approx(f.pinch_ratio)
+
+
+def test_thumb_in_front_of_the_index_is_a_contact_only_in_2d():
+    """Main de profil : vu de la caméra, le pouce passe DEVANT l'index (mêmes x, y) mais il
+    est 0,15 plus près de la caméra. En 2D, contact ; en 3D, les doigts restent séparés."""
+    hand = make_hand(fingers_extended=True, pinch=False)
+    x8, y8, z8 = hand[8]
+    hand[4] = (x8, y8, z8 - 0.15)
+    f = compute_features(hand)
+    assert f.pinch_ratio < 0.01
+    assert f.pinch_ratio_3d == pytest.approx(0.15 / 0.20)
+
+
+def test_pinch_ratio_3d_on_normalized_points_is_unchanged():
+    hand = make_hand(fingers_extended=True, pinch=False)
+    hand[4] = (0.40, 0.40, -0.05)
+    assert pinch_ratio_3d(normalize_landmarks(hand)) == pytest.approx(
+        compute_features(hand).pinch_ratio_3d)

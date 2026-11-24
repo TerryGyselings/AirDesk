@@ -47,6 +47,7 @@ HAND_COLUMNS = [
     "pinch_seg_68",  # distance pouce -> segment 6-8 de l'index / taille de main
     "palm_width",  # largeur apparente de la paume (5 -> 17) / taille de main
     "palm_facing",  # part de la normale à la paume dirigée vers la caméra (1 = de face)
+    "pinch_ratio_3d",  # distance pouce-index en 3D / taille de main 3D
 ]
 
 COLUMNS = (
@@ -61,6 +62,10 @@ COLUMNS = (
         "wrist_speed",  # vitesse du poignet en tailles de main par seconde
         "cursor_x",  # position calculée du curseur en pixels écran (pointage absolu)
         "cursor_y",
+        "closing_speed",  # vitesse de fermeture des doigts (baisse de pinch_ratio par s)
+        "closing_speed_3d",  # idem sur pinch_ratio_3d
+        "entry_block",  # pourquoi un pincement ne peut pas commencer (vide : il le peut)
+        "tracker_hands",  # nombre de mains demandé à MediaPipe pour l'image (1 ou 2)
     ]
 )
 
@@ -142,6 +147,7 @@ def hand_columns(features) -> list:
     row.append(f"{features.pinch_seg_68:.4f}")
     row.append(f"{features.palm_width:.4f}")
     row.append(f"{features.palm_facing:.4f}")
+    row.append(f"{features.pinch_ratio_3d:.4f}")
     return row
 
 
@@ -193,6 +199,10 @@ class SessionLog:
         wrist: tuple[float, float] | None = None,
         wrist_speed: float | None = None,
         cursor: tuple[int, int] | None = None,
+        closing_speed: float | None = None,
+        closing_speed_3d: float | None = None,
+        entry_block: str = "",
+        tracker_hands: int | None = None,
     ) -> None:
         """Une ligne par image. `features` vaut None quand aucune main n'est visible.
 
@@ -214,6 +224,10 @@ class SessionLog:
             row += ["", ""]
         else:
             row += [cursor[0], cursor[1]]
+        row.append(optional(closing_speed, 3))
+        row.append(optional(closing_speed_3d, 3))
+        row.append(entry_block)
+        row.append("" if tracker_hands is None else tracker_hands)
         self._writer.writerow(row)
 
     def __exit__(self, *exc) -> None:
