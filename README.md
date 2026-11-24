@@ -95,6 +95,14 @@ Pour vérifier qu'on est bien dans le venv : `where python` (Windows) ou `which 
 
 Au premier lancement, le modèle MediaPipe (environ 8 Mo) est téléchargé dans `models/`.
 
+**Placer la caméra** : la main doit rester **entière dans l'image** dans toutes les positions
+de travail, y compris quand elle est basse et détendue (bras posé, coude près du corps).
+Une caméra fixée en haut de l'écran voit mal le bas : la main sort par le bas de l'image dès
+qu'on vise le bas de l'écran confortablement. Préférer une caméra **plus basse** (posée sur
+le bureau ou sur un petit support devant l'écran) ou **inclinée vers le bas**, à 40-70 cm de
+la main. Vérifier dans la fenêtre de debug : en bougeant la main dans sa position de travail
+habituelle, le poignet doit rester visible.
+
 ## Lancer
 
 ```bash

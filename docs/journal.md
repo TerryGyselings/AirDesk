@@ -238,3 +238,29 @@ Analyses et décisions :
   min_palm_width reste à 0,22.
 - À faire : étalonnage de la zone par poste, session v3, puis décider de l'indice contre la main de
   profil ; vérifier en réel le gain de fluidité une fois actif.
+
+## 2026-11-24 — Étalonnage de la zone mis de côté
+
+- Deux essais d'étalonnage de la zone d'interaction, tous deux **non concluants en réel** :
+  1. 5 s de mouvements libres, zone = percentiles 3-97 : trop court, zone incohérente
+     (x 0,05..0,89, y 0,37..0,86). Jamais commité sur main.
+  2. Étalonnage guidé (5 cibles en plein écran, capture quand la main est immobile 1 s,
+     zone depuis les 4 coins étirée de 3 %, validation avant d'enregistrer) : **les cibles
+     bas-gauche et bas-droite ne se valident pas**.
+- **Cause : la position de la caméra.** Placée haut, elle voit mal le bas : en position
+  confortable pour viser les coins du bas, la main sort du cadre, et aucune capture n'est
+  possible. Le problème n'est pas l'algorithme, mais le champ de la caméra par rapport à la
+  posture de travail.
+- L'étalonnage guidé est conservé sur la branche **`wip/etalonnage-guide`** (commit
+  5400355, « non validé en réel : coins bas hors du champ quand la caméra est haute »),
+  avec sa logique testée (StillnessDetector, zone_from_corners, center_offset) et son
+  affichage plein écran.
+- Sur main : zone de l'ancien étalonnage retirée de config/local.yaml ; retour à la zone par
+  défaut de gestures.yaml (x 0,15..0,85, y 0,20..0,80).
+- Pistes pour plus tard :
+  - **conseiller à l'utilisateur** de placer la caméra plus bas (sur le bureau, devant
+    l'écran) ou inclinée vers le bas, pour que la main reste dans le champ en position
+    basse et détendue (conseil ajouté au README, section Installation) ;
+  - **afficher un avertissement** dans la fenêtre de debug (et pendant l'étalonnage) quand
+    la main sort par le bas de l'image, ou quand le poignet s'approche du bord bas ;
+  - reprendre ensuite l'étalonnage guidé de la branche, une fois la caméra bien placée.
