@@ -161,6 +161,20 @@ class ProbeResult:
     def ok(self) -> bool:
         return self.status == STATUS_OK
 
+    def summary(self) -> dict:
+        """Les mesures sous forme de dictionnaire simple (enregistrable en JSON)."""
+        return {
+            "index": self.index,
+            "backend": self.backend,
+            "requested": [self.requested[0], self.requested[1]],
+            "width": self.width,
+            "height": self.height,
+            "pixel_format": self.pixel_format,
+            "fps_measured": round(self.fps, 1),
+            "brightness": round(self.brightness, 1),
+            "status": self.status,
+        }
+
     def describe(self) -> str:
         """Résumé d'une ligne, en français, pour les messages d'erreur."""
         w, h = self.requested

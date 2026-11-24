@@ -35,3 +35,21 @@ Ce journal sert de matière première au rapport final.
   + 640x480 ~3 s) ; ~3 s avec `--width 640 --height 480 --backend dshow`.
 - À faire : vérifier si 640x480 suffit à la précision du suivi ; essayer MJPG avec un autre
   pilote (Logitech) ou un autre backend pour retrouver le 720p à 30 i/s.
+
+## 2026-11-24 — Dépôt git, réglages par machine, journal de mesures
+
+- Dépôt git initialisé et poussé sur GitHub (un seul commit de départ : l'archive v0.1
+  d'origine n'était pas disponible pour séparer la base du travail caméra).
+- Réglages par machine dans `config/local.yaml` (non versionné), priorité :
+  ligne de commande > local.yaml > gestures.yaml > défauts. `check_camera.py --save` l'écrit.
+  Mesure : ouverture de la C920 en 2,7 s au lieu de 11,9 s.
+- `airdesk --log` : un CSV par session (une ligne par image, aucune image enregistrée) et un
+  JSON des réglages (config fusionnée, version, commit + modifications non commitées, système,
+  caméra). Sans ce JSON, un log ne dit plus avec quels seuils il a été mesuré.
+- Durée d'un pincement calculée depuis `pinch_ratio` et l'hystérésis enter/exit, et non depuis
+  les états de la machine : ceux-ci dépendent de `click_max_ms`, le seuil qu'on veut régler.
+  L'issue observée (clic / glisser) est gardée à côté pour comparer.
+- Premier log réel (10 s, sans main) : 30,1 i/s, traitement 11,2 ms en moyenne, 11,8 ms au
+  95e percentile.
+- À faire : sessions de mesure avec plusieurs utilisateurs (clics volontaires puis glisser)
+  pour fixer `click_max_ms` et `pinch.enter/exit`.

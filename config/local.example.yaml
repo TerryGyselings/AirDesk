@@ -1,0 +1,23 @@
+# Modèle de réglages propres à une machine.
+#
+# Copier ce fichier en config/local.yaml (non versionné, ignoré par git), ou le faire écrire
+# automatiquement par le diagnostic :
+#
+#     python scripts/check_camera.py --save
+#
+# Priorité : options de la ligne de commande > config/local.yaml > config/gestures.yaml > défauts.
+# On peut aussi y surcharger un seuil de geste pour cette machine seulement (même structure
+# que gestures.yaml), par exemple :
+#
+# pinch:
+#   enter: 0.22
+
+camera:
+  # Index de la webcam (0, 1, 2...). L'index 0 est parfois une carte d'acquisition
+  # ou une caméra virtuelle : `python scripts/check_camera.py` dit lequel donne une image.
+  index: 0
+  # auto (selon le système), dshow ou msmf (Windows), avfoundation (macOS), v4l2 (Linux)
+  backend: auto
+  # Résolution demandée. 640x480 démarre plus vite sur les webcams lentes en 1280x720.
+  width: 1280
+  height: 720

@@ -55,12 +55,54 @@ airdesk               # pilote la vraie souris
 airdesk --camera 1    # autre webcam
 airdesk --width 640 --height 480   # résolution demandée (défaut : 1280x720)
 airdesk --backend dshow            # forcer l'API vidéo : dshow, msmf, avfoundation, v4l2, any
+airdesk --dry-run --log            # enregistre les mesures dans data/logs/ (voir « Mesures »)
 ```
 
 `q` ou `Échap` dans la fenêtre de debug pour quitter.
 
 Au démarrage, AirDesk affiche la caméra réellement utilisée, par exemple
 `Caméra 1 : backend DSHOW, 640x480 YUY2, 29.4 images/s mesurées`, précédée des essais écartés.
+
+## Réglages propres à la machine (`config/local.yaml`)
+
+Le bon index de caméra, le backend et la résolution dépendent de chaque ordinateur. On les
+enregistre une fois pour toutes dans `config/local.yaml`, **non versionné** (ignoré par git) :
+
+```bash
+python scripts/check_camera.py --save   # diagnostic + écrit la 1re combinaison qui marche
+airdesk --dry-run                       # utilise directement cette caméra
+```
+
+Ou à la main : copier [`config/local.example.yaml`](config/local.example.yaml) en
+`config/local.yaml` et l'adapter. Ordre de priorité, du plus fort au plus faible :
+
+1. options de la ligne de commande (`--camera`, `--backend`, `--width`, `--height`) ;
+2. `config/local.yaml` (peut aussi surcharger un seuil de geste pour cette machine) ;
+3. `config/gestures.yaml` (commun à l'équipe) ;
+4. valeurs par défaut du code.
+
+Exemple mesuré (webcam C920 à l'index 1) : ouverture en 2,7 s avec `local.yaml`, contre 11,9 s
+en essayant toutes les combinaisons.
+
+## Mesures (pour régler les seuils)
+
+```bash
+airdesk --dry-run --log            # faire quelques clics et glisser, puis q
+python scripts/analyse_log.py      # analyse le log le plus récent
+```
+
+`--log` écrit dans `data/logs/` (ignoré par git) deux fichiers par session :
+
+- `AAAA-MM-JJ_HH-MM-SS.csv` : une ligne par image : horodatage, main présente, `pinch_ratio`,
+  doigts tendus, état, événements émis, temps de traitement. **Aucune image** (RGPD) ;
+- `AAAA-MM-JJ_HH-MM-SS.json` : les réglages en vigueur (config complète fusionnée, version,
+  commit git et modifications non commitées, système, caméra réellement ouverte).
+
+`analyse_log.py` affiche les images/s, le temps de traitement (moyenne et 95e percentile),
+le nombre de clics et de glisser, puis la durée de chaque pincement avec un histogramme texte
+et la position de `click_max_ms`. Les durées sont calculées à partir de `pinch_ratio` et des
+seuils `enter`/`exit` lus dans le `.json` du log, et non à partir des états de la machine,
+qui dépendent justement de `click_max_ms`.
 
 ## Dépannage de la caméra
 
@@ -72,7 +114,7 @@ format, les images/s mesurées, la luminosité moyenne et un verdict. Aucune ima
 | --- | --- | --- |
 | Image noire | Mauvais index (carte d'acquisition, caméra infrarouge) ou backend MSMF | `check_camera.py`, puis `--camera N` |
 | Image figée | Caméra virtuelle éteinte (OBS Virtual Camera...) | Choisir un autre index |
-| Démarrage long (~10 s), puis 640x480 | Webcam trop lente en 1280x720 (format YUY2) et MSMF bloqué | `--width 640 --height 480 --backend dshow` démarre en ~3 s |
+| Démarrage long (~10 s), puis 640x480 | Webcam trop lente en 1280x720 (format YUY2) et MSMF bloqué | `python scripts/check_camera.py --save` : démarrage en ~3 s |
 | « Impossible d'obtenir une image » | Caméra prise par une autre appli, ou accès refusé | Fermer Teams/Zoom/Discord/navigateur ; voir autorisations ci-dessous |
 
 Ce que fait AirDesk à l'ouverture : il essaie les backends du système dans l'ordre
@@ -113,7 +155,13 @@ src/airdesk/
 ├── actuator/        4. actions sur le système (souris via pynput)
 ├── ui/              5. retour visuel (fenêtre de debug)
 ├── app.py           boucle principale qui relie les couches
-└── config.py        lecture de config/gestures.yaml
+├── config.py        réglages : gestures.yaml + local.yaml + ligne de commande
+├── session_log.py   écriture des mesures (--log)
+└── log_analysis.py  analyse des mesures (utilisé par scripts/analyse_log.py)
+
+scripts/
+├── check_camera.py  diagnostic des webcams (--save : écrit config/local.yaml)
+└── analyse_log.py   résumé et histogramme d'un log
 ```
 
 Chaque couche ne dépend que de celles du dessus : la machine à états, par exemple, ne connaît ni la caméra ni la souris, ce qui permet de la tester sans matériel.

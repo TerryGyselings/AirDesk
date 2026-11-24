@@ -1,0 +1,24 @@
+{
+  "started_at": "2026-11-24T15:00:00",
+  "airdesk_version": "0.1.0",
+  "git": {"commit": "33c6dd618492bbb948bd3bb7ceec71044ffc71d7", "dirty": false},
+  "system": {"platform": "Windows-11", "python": "3.12.10"},
+  "camera": {
+    "index": 1,
+    "backend": "dshow",
+    "requested": [640, 480],
+    "width": 640,
+    "height": 480,
+    "pixel_format": "YUY2",
+    "fps_measured": 29.7,
+    "brightness": 79.5,
+    "status": "ok"
+  },
+  "config": {
+    "engagement": {"hold_ms": 300, "lost_timeout_ms": 1000},
+    "pinch": {"enter": 0.25, "exit": 0.4, "click_max_ms": 300},
+    "pointer": {"pixels_per_frame_width": 2400, "landmark": 9},
+    "filter": {"min_cutoff": 1.0, "beta": 8.0, "d_cutoff": 1.0},
+    "camera": {"index": 1, "backend": "dshow", "width": 640, "height": 480}
+  }
+}
