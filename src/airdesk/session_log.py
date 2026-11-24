@@ -26,15 +26,34 @@ from airdesk.config import PROJECT_ROOT, Config
 
 LOG_DIR = PROJECT_ROOT / "data" / "logs"
 
-COLUMNS = [
-    "timestamp_ms",  # horodatage de l'image (ms depuis l'ouverture de la caméra)
+# Colonnes qui décrivent la main, remplies par `hand_columns`. Partagées avec les jeux de
+# données de scripts/record_gestures.py.
+HAND_COLUMNS = [
     "hand_present",  # 1 si une main est détectée, sinon 0
     "pinch_ratio",  # distance pouce-index / taille de la main (vide sans main)
     "extended_fingers",  # doigts tendus (index, majeur, annulaire, auriculaire), vide sans main
-    "state",  # état de la machine : veille, actif, pincement, glisser
-    "events",  # événements émis, joints par « + » (ex. « move+click »), vide sinon
-    "processing_ms",  # temps de traitement de l'image (détection + interprétation)
+    # Extension de chaque doigt (bout -> centre de paume / taille de main), en 2D puis en 3D
+    "ext_index",
+    "ext_middle",
+    "ext_ring",
+    "ext_pinky",
+    "folded_fingers",  # doigts repliés (extension 2D sous fingers.folded_below)
+    "ext3d_index",
+    "ext3d_middle",
+    "ext3d_ring",
+    "ext3d_pinky",
+    "folded_fingers_3d",
 ]
+
+COLUMNS = (
+    ["timestamp_ms"]  # horodatage de l'image (ms depuis l'ouverture de la caméra)
+    + HAND_COLUMNS
+    + [
+        "state",  # état de la machine : veille, actif, pincement, glisser
+        "events",  # événements émis, joints par « + » (ex. « move+click »), vide sinon
+        "processing_ms",  # temps de traitement de l'image (détection + interprétation)
+    ]
+)
 
 
 def git_commit(folder: Path = PROJECT_ROOT) -> dict:
@@ -87,6 +106,25 @@ def build_metadata(config: Config, camera: dict, git: dict | None = None) -> dic
     }
 
 
+def hand_columns(features) -> list:
+    """Valeurs des colonnes HAND_COLUMNS, dans le même ordre.
+
+    Sans main (`features` None) : hand_present = 0 et les autres colonnes vides.
+    Partagé avec scripts/record_gestures.py, pour que logs et jeux de données aient les
+    mêmes colonnes et le même format.
+    """
+    if features is None:
+        return [0] + [""] * (len(HAND_COLUMNS) - 1)
+    row = [1, f"{features.pinch_ratio:.4f}", features.extended_fingers]
+    for value in features.finger_extensions:
+        row.append(f"{value:.4f}")
+    row.append(features.folded_fingers)
+    for value in features.finger_extensions_3d:
+        row.append(f"{value:.4f}")
+    row.append(features.folded_fingers_3d)
+    return row
+
+
 def event_names(events: list) -> str:
     """[Move(...), Click()] -> "move+click"."""
     names = []
@@ -129,25 +167,12 @@ class SessionLog:
         self, timestamp_ms: int, features, state: str, events: list, processing_ms: float
     ) -> None:
         """Une ligne par image. `features` vaut None quand aucune main n'est visible."""
-        if features is None:
-            hand_present = 0
-            pinch_ratio = ""
-            extended_fingers = ""
-        else:
-            hand_present = 1
-            pinch_ratio = f"{features.pinch_ratio:.4f}"
-            extended_fingers = features.extended_fingers
-        self._writer.writerow(
-            [
-                timestamp_ms,
-                hand_present,
-                pinch_ratio,
-                extended_fingers,
-                state,
-                event_names(events),
-                f"{processing_ms:.2f}",
-            ]
-        )
+        row = [timestamp_ms]
+        row.extend(hand_columns(features))
+        row.append(state)
+        row.append(event_names(events))
+        row.append(f"{processing_ms:.2f}")
+        self._writer.writerow(row)
 
     def __exit__(self, *exc) -> None:
         if self._file is not None:

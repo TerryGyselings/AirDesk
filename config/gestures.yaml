@@ -14,7 +14,22 @@ pinch:
   enter: 0.25
   exit: 0.40
   # Un pincement plus court que ça = clic. Plus long = saisie (glisser).
-  click_max_ms: 300
+  click_max_ms: 400
+  # Règle anti-poing (poing fermé = pouce sur l'index replié = faux pincement).
+  # PAS ENCORE utilisée par la machine à états : à décider après mesures
+  # (scripts/record_gestures.py puis scripts/analyse_gestures.py).
+  # A = règle actuelle (pinch_ratio seul) ; B = A + index tendu ;
+  # C = B + au moins un autre doigt non replié ; B3D / C3D = idem avec la profondeur.
+  rule: A
+  # Extension minimale de l'index (bout -> centre de paume / taille de main). Provisoire.
+  min_index_extension: 1.0
+  min_index_extension_3d: 1.0
+
+fingers:
+  # Extension sous laquelle un doigt est compté comme replié (tendu ≈ 1,5 ; replié ≈ 0,4).
+  # Provisoire : à régler avec scripts/analyse_gestures.py.
+  folded_below: 0.8
+  folded_below_3d: 0.8
 
 pointer:
   # Gain contrôle/affichage (pointage relatif, comme un pavé tactile) :

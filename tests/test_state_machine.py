@@ -9,11 +9,30 @@ from airdesk.interpretation.state_machine import (
     State,
 )
 
-OPEN = HandFeatures(hand_size=0.2, pinch_ratio=0.8, extended_fingers=4, open_palm=True)
-FIST = HandFeatures(hand_size=0.2, pinch_ratio=0.8, extended_fingers=0, open_palm=False)
-PINCH = HandFeatures(hand_size=0.2, pinch_ratio=0.10, extended_fingers=3, open_palm=False)
+
+def features(pinch_ratio: float, extended_fingers: int, extension: float) -> HandFeatures:
+    """Descripteurs simplifiés : même extension (bout -> paume) pour les quatre doigts."""
+    extensions = (extension, extension, extension, extension)
+    folded = 4 if extension < 0.8 else 0
+    return HandFeatures(
+        hand_size=0.2,
+        pinch_ratio=pinch_ratio,
+        extended_fingers=extended_fingers,
+        open_palm=extended_fingers == 4,
+        finger_extensions=extensions,
+        index_extension=extension,
+        folded_fingers=folded,
+        finger_extensions_3d=extensions,
+        index_extension_3d=extension,
+        folded_fingers_3d=folded,
+    )
+
+
+OPEN = features(pinch_ratio=0.8, extended_fingers=4, extension=1.5)
+FIST = features(pinch_ratio=0.8, extended_fingers=0, extension=0.4)
+PINCH = features(pinch_ratio=0.10, extended_fingers=3, extension=1.4)
 # Entre les deux seuils (0.25 < 0.33 < 0.40) : sert à tester l'hystérésis.
-HALF = HandFeatures(hand_size=0.2, pinch_ratio=0.33, extended_fingers=3, open_palm=False)
+HALF = features(pinch_ratio=0.33, extended_fingers=3, extension=1.4)
 
 P = (0.5, 0.5)
 

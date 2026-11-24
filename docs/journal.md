@@ -53,3 +53,32 @@ Ce journal sert de matière première au rapport final.
   95e percentile.
 - À faire : sessions de mesure avec plusieurs utilisateurs (clics volontaires puis glisser)
   pour fixer `click_max_ms` et `pinch.enter/exit`.
+
+## 2026-11-24 — Poing pris pour un pincement : outillage de mesure
+
+- Constat en réel : poing fermé = pouce posé sur l'index replié → `pinch_ratio` petit →
+  clics et glisser involontaires (« Midas touch », Jacob 1991).
+- Nouveau descripteur, l'extension d'un doigt : distance bout → centre de la paume (moyenne
+  des points 0, 5, 9, 13, 17), divisée par la taille de la main. Insensible à la position, à
+  la rotation et à la distance. Sur main synthétique : tendu ≈ 1,5, replié ≈ 0,4.
+- Calculée en 2D et en 3D : un index pointé vers la caméra paraît court en 2D
+  (raccourcissement de perspective). La 3D utilise z de MediaPipe, à l'échelle de x.
+- Unités : MediaPipe divise x par la largeur et y par la hauteur de l'image. En 640x480, sans
+  correction, une main tournée de 90° change de proportions (1,48 contre 1,54 sur la main de
+  test). Les extensions sont donc calculées en unités homogènes (x et z multipliés par
+  largeur/hauteur). Décision en attente : `pinch_ratio` et `extended_fingers` n'ont PAS cette
+  correction, pour ne pas changer le comportement actuel ; à revoir avec la nouvelle règle.
+- Règles candidates (`interpretation/pinch_rules.py`) : A = actuelle, B = A + index tendu,
+  C = B + au moins un autre doigt non replié, B3D / C3D. Paramètres préparés dans
+  gestures.yaml, **non branchés** sur la machine à états : décision après mesures.
+- Protocole : `scripts/record_gestures.py`, 8 séquences étiquetées de 10 s ; pincements
+  répétés au métronome (1 par seconde) pour connaître le nombre attendu.
+- Analyse : distributions par étiquette ; matrices de confusion image par image (positif =
+  pincement maintenu sans sa première seconde) ; épisodes avec hystérésis pour les séquences
+  au métronome ; seuil proposé = milieu entre P95 des négatifs et P5 des positifs (marge =
+  écart), vérifié par l'indice de Youden (Youden, 1950). Seuils appris sur l'entraînement,
+  évalués sur un fichier de test séparé.
+- Essai technique : 8 séquences enregistrées et analysées de bout en bout (sans main devant la
+  caméra), puis supprimées.
+- À faire : enregistrer (plusieurs sessions, plusieurs participants), analyser, puis choisir
+  la règle et ses seuils.

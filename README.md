@@ -94,7 +94,8 @@ python scripts/analyse_log.py      # analyse le log le plus récent
 `--log` écrit dans `data/logs/` (ignoré par git) deux fichiers par session :
 
 - `AAAA-MM-JJ_HH-MM-SS.csv` : une ligne par image : horodatage, main présente, `pinch_ratio`,
-  doigts tendus, état, événements émis, temps de traitement. **Aucune image** (RGPD) ;
+  doigts tendus, extension de chaque doigt en 2D et 3D, doigts repliés, état, événements émis,
+  temps de traitement. **Aucune image** (RGPD) ;
 - `AAAA-MM-JJ_HH-MM-SS.json` : les réglages en vigueur (config complète fusionnée, version,
   commit git et modifications non commitées, système, caméra réellement ouverte).
 
@@ -103,6 +104,32 @@ le nombre de clics et de glisser, puis la durée de chaque pincement avec un his
 et la position de `click_max_ms`. Les durées sont calculées à partir de `pinch_ratio` et des
 seuils `enter`/`exit` lus dans le `.json` du log, et non à partir des états de la machine,
 qui dépendent justement de `click_max_ms`.
+
+## Jeux de données étiquetés (poing contre pincement)
+
+Problème étudié : un poing fermé pose le pouce sur l'index replié, ce que `pinch_ratio` seul
+prend pour un pincement (« Midas touch »). Pour choisir une règle à partir de mesures :
+
+```bash
+python scripts/record_gestures.py --participant P01     # ~2 min, guidé à l'écran
+python scripts/analyse_gestures.py data/datasets/A.csv data/datasets/B.csv --test data/datasets/C.csv
+```
+
+- `record_gestures.py` enchaîne 8 séquences de 10 s (main ouverte, pincements répétés au
+  métronome, pincement maintenu, poing, poing qui s'ouvre et se ferme, main relâchée, gestes
+  parasites, pincements index vers la caméra), avec un compte à rebours de 3 s. Il écrit dans
+  `data/datasets/` (ignoré par git) l'étiquette, les descripteurs et les 21 points normalisés
+  de chaque image, plus un `.json` des réglages. **Aucune image** ; `--participant` est un code
+  pseudonyme, jamais un nom.
+- `analyse_gestures.py` donne, par étiquette, les distributions de `pinch_ratio` et des
+  extensions de doigts, compare les règles A, B, C (et B/C en 3D) avec une matrice de
+  confusion, et propose des seuils avec leur marge. Les seuils sont appris sur les fichiers
+  d'entraînement et évalués sur le fichier `--test` ; sans `--test`, les résultats sont optimistes.
+- Descripteur clé, l'**extension** d'un doigt : distance bout du doigt → centre de la paume,
+  divisée par la taille de la main (tendu ≈ 1,5, replié ≈ 0,4). Calculée en 2D et en 3D :
+  un index pointé vers la caméra paraît court en 2D (perspective).
+- Les nouveaux paramètres (`pinch.rule`, `min_index_extension`, `fingers.folded_below`...) sont
+  dans `config/gestures.yaml` mais **pas encore utilisés** par la machine à états.
 
 ## Dépannage de la caméra
 
@@ -157,11 +184,14 @@ src/airdesk/
 ├── app.py           boucle principale qui relie les couches
 ├── config.py        réglages : gestures.yaml + local.yaml + ligne de commande
 ├── session_log.py   écriture des mesures (--log)
-└── log_analysis.py  analyse des mesures (utilisé par scripts/analyse_log.py)
+├── log_analysis.py  analyse des mesures (utilisé par scripts/analyse_log.py)
+└── gesture_analysis.py  analyse des jeux de données étiquetés (règles de pincement)
 
 scripts/
-├── check_camera.py  diagnostic des webcams (--save : écrit config/local.yaml)
-└── analyse_log.py   résumé et histogramme d'un log
+├── check_camera.py      diagnostic des webcams (--save : écrit config/local.yaml)
+├── analyse_log.py       résumé et histogramme d'un log
+├── record_gestures.py   enregistrement guidé de gestes étiquetés
+└── analyse_gestures.py  comparaison des règles de pincement, seuils proposés
 ```
 
 Chaque couche ne dépend que de celles du dessus : la machine à états, par exemple, ne connaît ni la caméra ni la souris, ce qui permet de la tester sans matériel.

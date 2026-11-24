@@ -17,6 +17,7 @@ htmlcov/
 models/
 data/raw/
 data/logs/
+data/datasets/
 *.mp4
 *.avi
 

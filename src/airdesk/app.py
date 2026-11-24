@@ -82,7 +82,13 @@ def run(
                 features = None
                 pointer = None
                 if hand is not None:
-                    features = compute_features(hand.landmarks)
+                    height, width = frame.bgr.shape[:2]
+                    features = compute_features(
+                        hand.landmarks,
+                        cfg.fingers.folded_below,
+                        cfg.fingers.folded_below_3d,
+                        aspect=width / height,
+                    )
                     raw = hand.landmarks[cfg.pointer.landmark]
                     pointer = pointer_filter(raw[0], raw[1], frame.timestamp_ms / 1000.0)
                 else:

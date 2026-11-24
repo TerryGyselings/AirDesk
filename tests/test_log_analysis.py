@@ -169,6 +169,10 @@ def test_text_histogram_without_values():
 class FakeFeatures:
     pinch_ratio: float
     extended_fingers: int
+    finger_extensions: tuple = (1.5, 1.5, 1.5, 1.5)
+    folded_fingers: int = 0
+    finger_extensions_3d: tuple = (1.5, 1.5, 1.5, 1.5)
+    folded_fingers_3d: int = 0
 
 
 def test_event_names():

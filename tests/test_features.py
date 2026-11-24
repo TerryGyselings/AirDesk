@@ -1,4 +1,11 @@
-from airdesk.interpretation.features import compute_features
+import math
+
+from airdesk.interpretation.features import (
+    compute_features,
+    count_folded,
+    normalize_landmarks,
+    palm_center,
+)
 
 
 def make_hand(fingers_extended: bool, pinch: bool):
@@ -57,3 +64,123 @@ def test_features_do_not_depend_on_distance_to_camera():
     b = compute_features(small)
     assert abs(a.pinch_ratio - b.pinch_ratio) < 1e-9
     assert a.extended_fingers == b.extended_fingers
+    for i in range(4):
+        assert abs(a.finger_extensions[i] - b.finger_extensions[i]) < 1e-9
+
+
+# --- Extension des doigts (bout -> centre de la paume / taille de main) ------------------------
+#
+# Main synthétique : centre de paume = moyenne de (0.50, 0.80), (0.44, 0.60), (0.50, 0.60),
+# (0.55, 0.60), (0.60, 0.60) = (0.518, 0.64). Taille de main 0.20.
+# Index tendu (0.44, 0.35) : distance 0.300 -> extension 1.50.
+# Index replié (0.44, 0.62) : distance 0.080 -> extension 0.40.
+
+
+def rotate_90(points):
+    """Rotation de 90° autour du centre de l'image (0.5, 0.5)."""
+    rotated = []
+    for x, y, z in points:
+        rotated.append((0.5 - (y - 0.5), 0.5 + (x - 0.5), z))
+    return rotated
+
+
+def to_image_coordinates(points, width, height):
+    """Points définis en unités « carrées » (x480 px) -> coordonnées MediaPipe d'une image
+    width x height (x divisé par la largeur, y par la hauteur, z à l'échelle de x)."""
+    converted = []
+    for x, y, z in points:
+        px = x * height
+        py = y * height
+        converted.append((px / width, py / height, z * height / width))
+    return converted
+
+
+def test_palm_center_is_the_mean_of_wrist_and_finger_bases():
+    cx, cy, cz = palm_center(make_hand(fingers_extended=True, pinch=False))
+    assert math.isclose(cx, 0.518)
+    assert math.isclose(cy, 0.64)
+    assert cz == 0.0
+
+
+def test_open_hand_has_long_extensions_and_no_folded_finger():
+    f = compute_features(make_hand(fingers_extended=True, pinch=False))
+    assert abs(f.index_extension - 1.50) < 0.01
+    for value in f.finger_extensions:
+        assert value > 1.4
+    assert f.folded_fingers == 0
+
+
+def test_fist_has_short_extensions_and_four_folded_fingers():
+    f = compute_features(make_hand(fingers_extended=False, pinch=False))
+    assert abs(f.index_extension - 0.40) < 0.01
+    for value in f.finger_extensions:
+        assert value < 0.5
+    assert f.folded_fingers == 4
+
+
+def test_fist_with_thumb_on_folded_index_looks_like_a_pinch_but_index_is_folded():
+    """Le bug constaté : poing fermé + pouce sur l'index replié = pinch_ratio minuscule.
+    Seule l'extension de l'index permet de le distinguer d'un vrai pincement."""
+    fist = compute_features(make_hand(fingers_extended=False, pinch=True))
+    real_pinch = compute_features(make_hand(fingers_extended=True, pinch=True))
+    assert fist.pinch_ratio < 0.05  # ressemble à un pincement...
+    assert real_pinch.pinch_ratio < 0.05
+    assert fist.index_extension < 0.8  # ... mais l'index est replié
+    assert real_pinch.index_extension > 1.2
+
+
+def test_extensions_do_not_depend_on_rotation():
+    hand = make_hand(fingers_extended=True, pinch=False)
+    a = compute_features(hand)
+    b = compute_features(rotate_90(hand))
+    for i in range(4):
+        assert abs(a.finger_extensions[i] - b.finger_extensions[i]) < 1e-9
+
+
+def test_aspect_correction_makes_extensions_rotation_invariant_in_640x480():
+    """En 640x480, x est divisé par 640 et y par 480 : sans correction, tourner la main change
+    ses proportions. Avec aspect = 640/480, on retrouve les mêmes extensions."""
+    hand = make_hand(fingers_extended=True, pinch=False)
+    upright = to_image_coordinates(hand, 640, 480)
+    turned = to_image_coordinates(rotate_90(hand), 640, 480)
+    a = compute_features(upright, aspect=640 / 480)
+    b = compute_features(turned, aspect=640 / 480)
+    assert abs(a.index_extension - b.index_extension) < 1e-9
+    assert abs(a.index_extension - 1.50) < 0.01
+    # Sans la correction, les deux postures ne donnent pas la même valeur.
+    c = compute_features(upright)
+    d = compute_features(turned)
+    assert abs(c.index_extension - d.index_extension) > 0.03  # ≈ 1,48 contre 1,54
+
+
+def test_index_pointing_at_camera_is_short_in_2d_but_not_in_3d():
+    """Raccourcissement de perspective : bout de l'index au-dessus de sa base dans l'image,
+    mais 0.28 plus près de la caméra (z négatif = plus proche, à l'échelle de x)."""
+    hand = make_hand(fingers_extended=True, pinch=False)
+    hand[8] = (0.44, 0.56, -0.28)
+    f = compute_features(hand)
+    assert f.index_extension < 0.8  # en 2D, l'index paraît replié
+    assert abs(f.index_extension_3d - 1.51) < 0.01  # en 3D, il est bien tendu
+    assert f.folded_fingers == 1
+    assert f.folded_fingers_3d == 0
+
+
+def test_count_folded_uses_the_threshold():
+    assert count_folded((1.5, 0.79, 0.8, 0.2), folded_below=0.8) == 2
+    assert count_folded((1.5, 0.79, 0.8, 0.2), folded_below=0.5) == 1
+
+
+def test_normalize_landmarks_puts_wrist_at_origin_and_hand_size_at_one():
+    hand = make_hand(fingers_extended=True, pinch=False)
+    normalized = normalize_landmarks(hand)
+    assert normalized[0] == (0.0, 0.0, 0.0)
+    x9, y9, _ = normalized[9]
+    assert math.isclose(math.hypot(x9, y9), 1.0)
+    # Même forme, plus loin de la caméra (deux fois plus petite) : mêmes points normalisés.
+    small = []
+    for x, y, z in hand:
+        small.append((0.5 + (x - 0.5) / 2, 0.5 + (y - 0.5) / 2, z / 2))
+    normalized_small = normalize_landmarks(small)
+    for i in range(21):
+        for axis in range(3):
+            assert abs(normalized[i][axis] - normalized_small[i][axis]) < 1e-9

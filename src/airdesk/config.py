@@ -31,6 +31,19 @@ class PinchConfig:
     enter: float = 0.25
     exit: float = 0.40
     click_max_ms: float = 300
+    # Règle anti-poing (voir interpretation/pinch_rules.py). PAS ENCORE utilisée par la
+    # machine à états : décision après mesures. "A" = règle actuelle.
+    rule: str = "A"
+    min_index_extension: float = 1.0
+    min_index_extension_3d: float = 1.0
+
+
+@dataclass(frozen=True)
+class FingersConfig:
+    """Seuils d'extension (bout -> centre de paume / taille de main) d'un doigt replié."""
+
+    folded_below: float = 0.8
+    folded_below_3d: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -63,6 +76,7 @@ class Config:
     pointer: PointerConfig
     filter: FilterConfig
     camera: CameraConfig
+    fingers: FingersConfig
 
 
 def read_yaml(path: Path) -> dict:
@@ -109,6 +123,7 @@ def load_config(path: Path | None = None, local_path: Path | None = LOCAL_CONFIG
         pointer=PointerConfig(**raw.get("pointer", {})),
         filter=FilterConfig(**raw.get("filter", {})),
         camera=CameraConfig(**raw.get("camera", {})),
+        fingers=FingersConfig(**raw.get("fingers", {})),
     )
 
 
