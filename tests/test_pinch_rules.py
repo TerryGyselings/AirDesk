@@ -7,6 +7,7 @@ from airdesk.interpretation.pinch_rules import (
     PinchHysteresis,
     RuleThresholds,
     pinch_candidate,
+    pinch_measure,
 )
 
 T = RuleThresholds(enter=0.25, min_index_extension=1.0, folded_below=0.8,
@@ -105,3 +106,49 @@ def test_grace_end_time_is_when_the_release_started():
 def test_hysteresis_between_enter_and_exit_keeps_the_pinch():
     h = PinchHysteresis("A", T, exit=0.40, release_grace_ms=0)
     assert run(h, [0.1, 0.3, 0.35, 0.3]) == [("start", 0)]
+
+
+def run_with_fingers(hysteresis, frames):
+    """frames : liste de (pinch_value, extensions) ; une image toutes les 33 ms."""
+    events = []
+    for i in range(len(frames)):
+        value, extensions = frames[i]
+        event = hysteresis.update(i * 33, value, extensions, extensions)
+        if event is not None:
+            events.append((event, i * 33))
+    return events
+
+
+def test_exit_on_fold_releases_when_the_other_fingers_fold():
+    """Entré avec les doigts ouverts, puis poing fermé en gardant le pouce sur l'index."""
+    frames = [(0.1, TENDUS), (0.1, POING), (0.1, POING)]
+    without = PinchHysteresis("D", T, exit=0.40)
+    assert run_with_fingers(without, frames) == [("start", 0)]
+    with_fold = PinchHysteresis("D", T, exit=0.40, exit_on_fold=True)
+    assert run_with_fingers(with_fold, frames) == [("start", 0), ("end", 33)]
+
+
+def test_exit_on_fold_respects_the_release_grace():
+    """Un repli d'une seule image (suivi qui décroche) ne relâche pas avec un délai de 66 ms."""
+    frames = [(0.1, TENDUS), (0.1, POING), (0.1, TENDUS), (0.1, TENDUS)]
+    h = PinchHysteresis("D", T, exit=0.40, release_grace_ms=66, exit_on_fold=True)
+    assert run_with_fingers(h, frames) == [("start", 0)]
+
+
+def test_exit_on_fold_has_no_effect_on_rule_a():
+    """La règle A n'exige pas d'autre doigt ouvert : rien à surveiller."""
+    h = PinchHysteresis("A", T, exit=0.40, exit_on_fold=True)
+    assert run_with_fingers(h, [(0.1, POING), (0.1, POING)]) == [("start", 0)]
+
+
+def test_pinch_measure_selects_the_value():
+    class Features:
+        pinch_ratio = 0.5
+        pinch_seg = 0.2
+        pinch_seg_68 = 0.1
+
+    assert pinch_measure(Features, "ratio") == 0.5
+    assert pinch_measure(Features, "seg78") == 0.2
+    assert pinch_measure(Features, "seg68") == 0.1
+    with pytest.raises(ValueError, match="Mesure de pincement inconnue"):
+        pinch_measure(Features, "angle")

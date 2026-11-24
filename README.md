@@ -18,11 +18,23 @@ Projet innovation-recherche — ESIR, Université de Rennes (2026-2027).
 | --- | --- |
 | Main ouverte face à la caméra pendant 0,3 s | Active le contrôle |
 | Déplacer la main | Déplace le curseur |
-| Pincement bref pouce-index (< 0,3 s) | Clic gauche |
+| Pincement bref pouce-index (< `click_max_ms`, 0,4 s) | Clic gauche |
 | Pincement maintenu puis déplacement | Glisser-déposer (ex. déplacer une fenêtre par sa barre de titre) |
 | Main hors du champ plus de 1 s | Retour en veille |
 
 Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
+
+**Bien se placer** :
+
+- **Distance de travail : 40 à 70 cm** de la caméra, la **main entière dans l'image**
+  (poignet compris). Trop loin, la main devient petite et le suivi plus bruité ; trop près,
+  les doigts sortent du cadre.
+- **Geste de pincement : le « OK »**. Le bout du pouce touche le bout de l'index, **paume
+  tournée vers l'écran**, les autres doigts **détendus** (ni serrés en poing, ni crispés).
+  Pendant un glisser, garder pouce et index collés et bouger la main sans à-coups.
+- **Non reconnu** : le pincement index pointé vers la caméra, autres doigts repliés. C'est
+  une décision de conception : ce geste ressemble trop à un poing pour être distingué de
+  façon fiable.
 
 ## Installation
 
@@ -129,6 +141,16 @@ python scripts/analyse_gestures.py data/datasets/A.csv data/datasets/B.csv --tes
   répétés détectés, et recommande la meilleure configuration. Les seuils sont appris sur les
   fichiers d'entraînement et évalués sur le fichier `--test` ; sans `--test`, les résultats
   sont optimistes. Le pincement « index vers la caméra » est hors vocabulaire (information).
+  La configuration est choisie sur l'entraînement seulement, le test ne sert qu'à vérifier.
+  Options : `--sweep-csv data/analyses/balayage.csv` (toutes les configurations),
+  `--ruptures-non-fiables` (si le pincement maintenu a pu être relâché pendant l'enregistrement).
+- Mesures de pincement comparées : `pinch_ratio` (pouce → bout de l'index) et `pinch_seg`
+  (pouce → dernière phalange de l'index, variante `pinch_seg_68` sur deux phalanges).
+- Protocole v2 de `record_gestures.py` : consigne du pincement maintenu précisée (doigts
+  collés, petits mouvements lents) et position / vitesse du poignet enregistrées.
+- **Configuration en service** (`config/gestures.yaml`) : règle D, mesure `ratio`,
+  enter 0,25 / exit 0,40, délai de relâchement 66 ms, sans sortie sur repli. `rule: A` et
+  `release_grace_ms: 0` redonnent le comportement d'origine, pour comparer.
 - Descripteur clé, l'**extension** d'un doigt : distance bout du doigt → centre de la paume,
   divisée par la taille de la main (tendu ≈ 1,5, replié ≈ 0,4). Calculée en 2D et en 3D :
   un index pointé vers la caméra paraît court en 2D (perspective).

@@ -112,3 +112,36 @@ Ce journal sert de matière première au rapport final.
   appliquer aussi la condition « autre doigt ouvert » pour rester en pincement. Autre source :
   main relâchée avec pinch_ratio ≈ 0,3-0,4, entre enter et exit.
 - Rien n'est branché sur la machine à états.
+
+## 2026-11-24 — pinch_seg, sortie sur repli, sélection sur l'entraînement
+
+- Réponse de P01 sur le pincement maintenu : « pas sûr » d'avoir gardé le pincement tout le
+  long. Les ruptures de ces deux fichiers sont donc traitées comme non fiables
+  (`--ruptures-non-fiables`) : affichées, mais hors classement. Consigne de
+  record_gestures.py précisée (doigts collés, petits mouvements lents, sans revenir en
+  arrière) ; protocole v2, qui enregistre aussi la position et la vitesse du poignet (en
+  tailles de main par seconde) pour relier les ruptures aux mouvements rapides.
+- Méthode : filtres et classement sur l'ENTRAÎNEMENT seulement. Avec 180 configurations,
+  choisir d'après le test reviendrait à régler les paramètres sur le test, qui ne mesurerait
+  plus rien ; le test sert uniquement à vérifier le choix.
+- `pinch_seg` (pouce -> segment 7-8 de l'index) et `pinch_seg_68` (segment 6-8), recalculés
+  à partir des points enregistrés. Distributions proches de pinch_ratio ; seg68 est plus
+  petite sur le poing (P95 0,25 contre 0,40), ce qui rapproche le poing du pincement.
+  Hypothèse « moins de ruptures » non confirmée sur ces fichiers (ruptures identiques,
+  3 / 5), mais ces ruptures ne sont pas fiables : à refaire avec le protocole v2.
+- Sortie sur repli (`exit_on_fold`) : supprime les faux glisser au test (D, ratio, 0,25 /
+  0,40, 66 ms : 3 -> 0), mais coupe les longs faux épisodes en courts (faux clics 6 -> 9) et
+  ajoute des ruptures au test (5 -> 8).
+- Résultat : aucune des 180 configurations n'atteint 0 faux glisser ET au plus 1 faux clic
+  sur l'entraînement (au mieux 4 faux clics). Configuration d'origine : 16 faux clics et
+  8 faux glisser à l'entraînement.
+- Décision (P01) : brancher malgré tout la 1re configuration du classement, D, ratio,
+  enter 0,25 / exit 0,40, délai 66 ms, sans sortie sur repli. Chiffres entraînement / test :
+  faux clics 4 / 6, faux glisser 0 / 3, répétés 8/10 / 9/10, contre 16 / 11 faux clics et
+  8 / 11 faux glisser pour la configuration d'origine. folded_below = 0,87 (appris).
+- Branchement : la machine à états délègue l'entrée / sortie du pincement à PinchHysteresis
+  (même code que l'analyse). `rule: A` + `release_grace_ms: 0` redonne l'ancien comportement
+  (tests d'origine inchangés). Démarrage réel vérifié sans erreur ; pas encore testé en usage.
+- À faire : sessions protocole v2 (plusieurs participants), puis réévaluer pinch_seg,
+  exit_on_fold et le délai sur des ruptures fiables, et relier les ruptures à la vitesse du
+  poignet.

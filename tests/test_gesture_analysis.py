@@ -12,6 +12,7 @@ tests/data/sample_dataset.csv (entraînement), seuils enter 0.25 / exit 0.40 :
 - pincement_vers_camera : 2 pincements, index court en 2D (0.7 / 0.6) mais long en 3D.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,8 @@ from airdesk.gesture_analysis import (
     END_RELEASED,
     END_SEQUENCE,
     EPISODE_LABELS,
+    EXT3D_COLUMNS,
+    EXT_COLUMNS,
     OUT_OF_VOCABULARY_LABELS,
     POSITIVE_LABEL,
     EpisodeMetrics,
@@ -37,6 +40,7 @@ from airdesk.gesture_analysis import (
     propose_hand_size_ratio,
     propose_threshold,
     propose_thresholds,
+    rank,
     read_dataset,
     recommend,
     rejected_by_guard,
@@ -386,13 +390,19 @@ def metrics(ruptures, clicks, drags, repeated):
     return EpisodeMetrics(ruptures, clicks, drags, [], repeated, 10, 0)
 
 
-def row(rule, exit, grace, test, train=None):
-    if train is None:
-        train = metrics(0, 0, 0, 10)
-    return SweepRow(rule, exit, grace, train, test)
+def row(rule, exit, grace, train, test=None):
+    """Une ligne de balayage ; `test` par défaut : des chiffres catastrophiques, pour vérifier
+    qu'ils n'influencent PAS le choix."""
+    if test is None:
+        test = metrics(9, 9, 9, 0)
+    return SweepRow(settings(rule, exit, grace), train, test)
 
 
-def test_recommend_filters_on_test_then_ranks():
+def describe_row(r):
+    return (r.settings.rule, r.settings.exit, r.settings.release_grace_ms)
+
+
+def test_recommend_filters_and_ranks_on_train_only():
     rows = [
         row("A", 0.40, 0, metrics(0, 3, 0, 10)),  # trop de faux clics
         row("D", 0.40, 0, metrics(2, 1, 0, 9)),
@@ -401,8 +411,18 @@ def test_recommend_filters_on_test_then_ranks():
         row("D3D", 0.50, 66, metrics(0, 1, 0, 9)),  # même score que la précédente, délai plus court
         row("D3D", 0.40, 0, metrics(0, 0, 1, 10)),  # un faux glisser : exclue
     ]
-    best = recommend(rows)
-    assert (best.rule, best.exit, best.release_grace_ms) == ("D3D", 0.50, 66)
+    assert describe_row(recommend(rows)) == ("D3D", 0.50, 66)
+
+
+def test_test_figures_never_change_the_choice():
+    """Même entraînement, test excellent pour l'une et catastrophique pour l'autre : le choix
+    ne bouge pas (sinon on réglerait les paramètres sur le test)."""
+    good_train = metrics(0, 0, 0, 10)
+    rows = [
+        row("D", 0.40, 0, good_train, test=metrics(9, 9, 9, 0)),
+        row("D", 0.50, 66, good_train, test=metrics(0, 0, 0, 10)),
+    ]
+    assert describe_row(recommend(rows)) == ("D", 0.40, 0)
 
 
 def test_recommend_returns_none_when_nothing_qualifies():
@@ -410,9 +430,81 @@ def test_recommend_returns_none_when_nothing_qualifies():
     assert recommend(rows) is None
 
 
-def test_recommend_uses_train_when_there_is_no_test():
+def test_unreliable_ruptures_are_left_out_of_the_ranking():
+    """Ruptures non fiables : on classe par faux clics, puis épisodes répétés détectés."""
     rows = [
-        SweepRow("A", 0.40, 0, metrics(0, 5, 0, 10), None),
-        SweepRow("D", 0.40, 100, metrics(1, 0, 0, 10), None),
+        row("A", 0.40, 0, metrics(0, 1, 0, 8)),  # 0 rupture mais 1 faux clic
+        row("D", 0.40, 0, metrics(3, 0, 0, 7)),  # 3 ruptures, 0 faux clic, 7 répétés
+        row("D", 0.50, 66, metrics(5, 0, 0, 9)),  # 5 ruptures, 0 faux clic, 9 répétés
     ]
-    assert recommend(rows).rule == "D"
+    assert describe_row(recommend(rows, ruptures_reliable=True)) == ("A", 0.40, 0)
+    assert describe_row(recommend(rows, ruptures_reliable=False)) == ("D", 0.50, 66)
+
+
+def test_rank_puts_qualifying_rows_first():
+    rows = [row("A", 0.40, 0, metrics(0, 3, 0, 10)), row("D", 0.40, 0, metrics(4, 0, 0, 5))]
+    ranked = rank(rows)
+    assert ranked[0].settings.rule == "D"
+
+
+# --- Sortie sur repli des doigts et mesure de pincement ----------------------------------------
+
+
+def fist_entered_by_mistake():
+    """Main pincée doigts ouverts une image (entrée de D), puis poing fermé 2 s, pouce contre
+    l'index : pinch_ratio reste petit. Sans sortie sur repli, D reste « pincé » jusqu'au bout."""
+    frames = [frame("poing", 0, 0.1, extensions=OPEN_OTHERS)]
+    for i in range(1, 61):
+        frames.append(frame("poing", i, 0.2, extensions=FIST))
+    return frames
+
+
+def test_exit_on_fold_ends_a_fist_entered_by_mistake():
+    without = simulate_sequence(fist_entered_by_mistake(), settings("D"))
+    assert without[0].ended_by == END_SEQUENCE
+    assert without[0].duration_ms == 60 * STEP  # un faux glisser de 2 s
+    with_fold = simulate_sequence(
+        fist_entered_by_mistake(), replace(settings("D"), exit_on_fold=True)
+    )
+    assert with_fold[0].ended_by == END_RELEASED
+    assert with_fold[0].duration_ms == STEP  # relâché dès la première image de poing
+
+
+def test_measure_is_used_by_the_simulation():
+    """pinch_ratio reste haut (pouce sous le bout de l'index) mais pinch_seg est petit."""
+    frames = []
+    for i in range(30):
+        s = frame("pincements_repetes", i, 0.6)
+        s.pinch_seg = 0.1 if 10 <= i < 20 else 0.6
+        s.pinch_seg_68 = s.pinch_seg
+        frames.append(s)
+    assert len(simulate_sequence(frames, settings())) == 0
+    seg = replace(settings(), measure="seg78")
+    assert len(simulate_sequence(frames, seg)) == 1
+
+
+def test_missing_measure_gives_a_clear_error(train):
+    with pytest.raises(ValueError, match="indisponible"):
+        simulate_sequence(train[:3], replace(settings(), measure="seg78"))
+
+
+def test_read_dataset_computes_pinch_seg_from_landmarks(tmp_path):
+    """Pouce (4) posé au milieu de la dernière phalange (7-8) : pinch_seg nul, pinch_ratio non."""
+    points = [(0.0, 0.0, 0.0)] * 21
+    points[9] = (0.0, -1.0, 0.0)  # base du majeur : taille de main = 1
+    points[6] = (0.3, -1.4, 0.0)
+    points[7] = (0.3, -1.6, 0.0)
+    points[8] = (0.3, -1.8, 0.0)
+    points[4] = (0.3, -1.7, 0.0)
+    header = ["label", "t_in_sequence_ms", "hand_present", "pinch_ratio", "hand_size"]
+    header += EXT_COLUMNS + EXT3D_COLUMNS
+    values = ["pincement_maintenu", "1000", "1", "0.5", "0.2"] + ["1.5"] * 8
+    for i in range(21):
+        header += [f"x{i}", f"y{i}", f"z{i}"]
+        values += [str(points[i][0]), str(points[i][1]), str(points[i][2])]
+    path = tmp_path / "points.csv"
+    path.write_text(",".join(header) + "\n" + ",".join(values) + "\n", encoding="utf-8")
+    sample = read_dataset(path)[0]
+    assert sample.pinch_seg == pytest.approx(0.0)
+    assert sample.pinch_seg_68 == pytest.approx(0.0)
+    assert sample.pinch_ratio == 0.5

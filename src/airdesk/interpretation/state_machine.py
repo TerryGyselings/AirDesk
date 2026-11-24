@@ -19,8 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from airdesk.config import EngagementConfig, PinchConfig
+from airdesk.config import EngagementConfig, FingersConfig, PinchConfig
 from airdesk.interpretation.features import HandFeatures
+from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_measure
 
 
 class State(Enum):
@@ -57,10 +58,36 @@ Event = Move | Click | Press | Release
 
 
 class GestureStateMachine:
-    def __init__(self, engagement: EngagementConfig, pinch: PinchConfig):
+    """Machine à états d'engagement et de pincement.
+
+    L'entrée / sortie du pincement est déléguée à PinchHysteresis (pinch_rules.py), réglée
+    par config/gestures.yaml : règle (A = pinch_ratio seul, D = + un autre doigt ouvert...),
+    mesure (pinch_ratio ou pinch_seg), enter / exit, délai de relâchement, sortie sur repli.
+    Avec rule A, measure ratio et release_grace_ms 0, on retrouve le comportement d'origine.
+    Choix de la configuration : voir scripts/analyse_gestures.py et docs/journal.md.
+    """
+
+    def __init__(
+        self,
+        engagement: EngagementConfig,
+        pinch: PinchConfig,
+        fingers: FingersConfig | None = None,
+    ):
+        if fingers is None:
+            fingers = FingersConfig()
         self.engagement = engagement
         self.pinch = pinch
         self.state = State.IDLE
+        thresholds = RuleThresholds(
+            enter=pinch.enter,
+            min_index_extension=pinch.min_index_extension,
+            folded_below=fingers.folded_below,
+            min_index_extension_3d=pinch.min_index_extension_3d,
+            folded_below_3d=fingers.folded_below_3d,
+        )
+        self._pinch_detector = PinchHysteresis(
+            pinch.rule, thresholds, pinch.exit, pinch.release_grace_ms, pinch.exit_on_fold
+        )
         self._arm_start_ms: float | None = None
         self._pinch_start_ms: float = 0.0
         self._last_seen_ms: float | None = None
@@ -86,6 +113,7 @@ class GestureStateMachine:
                 if self.state == State.DRAGGING:
                     events.append(Release())
                 self.state = State.IDLE
+                self._pinch_detector.reset()
             return events
 
         self._last_seen_ms = t_ms
@@ -99,6 +127,7 @@ class GestureStateMachine:
                     self.state = State.ACTIVE
                     self._arm_start_ms = None
                     self._prev_pointer = pointer  # pas de saut du curseur à l'activation
+                    self._pinch_detector.reset()
             else:
                 self._arm_start_ms = None
             return events
@@ -111,20 +140,21 @@ class GestureStateMachine:
                 events.append(Move(dx, dy))
         self._prev_pointer = pointer
 
-        # --- Pincement avec hystérésis ---
-        currently_pinched = self.state in (State.PINCHING, State.DRAGGING)
-        if currently_pinched:
-            pinched = features.pinch_ratio < self.pinch.exit
-        else:
-            pinched = features.pinch_ratio < self.pinch.enter
+        # --- Pincement : entrée / sortie confiées à PinchHysteresis ---
+        pinch_event = self._pinch_detector.update(
+            t_ms,
+            pinch_measure(features, self.pinch.measure),
+            features.finger_extensions,
+            features.finger_extensions_3d,
+        )
 
         if self.state == State.ACTIVE:
-            if pinched:
+            if pinch_event == "start":
                 self.state = State.PINCHING
                 self._pinch_start_ms = t_ms
 
         elif self.state == State.PINCHING:
-            if not pinched:
+            if pinch_event == "end":
                 events.append(Click())
                 self.state = State.ACTIVE
             elif t_ms - self._pinch_start_ms > self.pinch.click_max_ms:
@@ -132,7 +162,7 @@ class GestureStateMachine:
                 self.state = State.DRAGGING
 
         elif self.state == State.DRAGGING:
-            if not pinched:
+            if pinch_event == "end":
                 events.append(Release())
                 self.state = State.ACTIVE
 

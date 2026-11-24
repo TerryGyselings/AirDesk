@@ -173,6 +173,8 @@ class FakeFeatures:
     folded_fingers: int = 0
     finger_extensions_3d: tuple = (1.5, 1.5, 1.5, 1.5)
     folded_fingers_3d: int = 0
+    pinch_seg: float = 0.7
+    pinch_seg_68: float = 0.6
 
 
 def test_event_names():

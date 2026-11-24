@@ -23,6 +23,7 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
+from airdesk.interpretation.features import pinch_segment
 from airdesk.interpretation.pinch_rules import PinchHysteresis, RuleThresholds, pinch_candidate
 from airdesk.interpretation.quality import HandSizeGuard
 from airdesk.log_analysis import percentile
@@ -51,10 +52,40 @@ class Sample:
     extensions: tuple[float, float, float, float] | None
     extensions_3d: tuple[float, float, float, float] | None
     hand_size: float | None = None  # None : inconnue (le garde-fou laisse alors passer)
+    # Distance pouce -> segment de l'index, recalculée à partir des 21 points enregistrés
+    # (None si le fichier n'a pas les colonnes des points, comme les CSV d'exemple).
+    pinch_seg: float | None = None
+    pinch_seg_68: float | None = None
 
     @property
     def hand_present(self) -> bool:
         return self.pinch_ratio is not None
+
+
+def measure_value(s: Sample, measure: str) -> float:
+    """Valeur de la mesure de pincement choisie (voir pinch_rules.MEASURES)."""
+    if measure == "ratio":
+        value = s.pinch_ratio
+    elif measure == "seg78":
+        value = s.pinch_seg
+    elif measure == "seg68":
+        value = s.pinch_seg_68
+    else:
+        raise ValueError(f"Mesure inconnue : {measure}")
+    if value is None:
+        raise ValueError(f"Mesure « {measure} » indisponible : le jeu de données n'a pas les "
+                         "colonnes des 21 points (x0, y0, ...).")
+    return value
+
+
+def landmarks_from_record(record: dict) -> list[tuple[float, float, float]] | None:
+    """Les 21 points normalisés d'une ligne de CSV, ou None si les colonnes manquent."""
+    if not record.get("x0"):
+        return None
+    points = []
+    for i in range(21):
+        points.append((float(record[f"x{i}"]), float(record[f"y{i}"]), float(record[f"z{i}"])))
+    return points
 
 
 def read_dataset(path: Path) -> list[Sample]:
@@ -75,6 +106,14 @@ def read_dataset(path: Path) -> list[Sample]:
             hand_size = None
             if record.get("hand_size"):
                 hand_size = float(record["hand_size"])
+            pinch_seg = None
+            pinch_seg_68 = None
+            points = landmarks_from_record(record)
+            if points is not None:
+                # Points déjà relatifs au poignet, en unités homogènes et divisés par la
+                # taille de main : même calcul qu'en direct (features.pinch_segment).
+                pinch_seg = pinch_segment(points, 7)
+                pinch_seg_68 = pinch_segment(points, 6)
             samples.append(
                 Sample(
                     label=record["label"],
@@ -83,6 +122,8 @@ def read_dataset(path: Path) -> list[Sample]:
                     extensions=(ext[0], ext[1], ext[2], ext[3]),
                     extensions_3d=(ext3d[0], ext3d[1], ext3d[2], ext3d[3]),
                     hand_size=hand_size,
+                    pinch_seg=pinch_seg,
+                    pinch_seg_68=pinch_seg_68,
                 )
             )
     return samples
@@ -160,13 +201,18 @@ def describe(values: list[float]) -> Stats | None:
 # Descripteurs résumés pour chaque étiquette.
 # « autres_max » = la plus grande extension parmi majeur, annulaire, auriculaire :
 # petite si tous ces doigts sont repliés (poing), c'est ce que testent les règles C et D.
-DESCRIPTORS = ["pinch_ratio", "ext_index", "ext_index_3d", "ext_autres_max", "ext_autres_max_3d"]
+DESCRIPTORS = ["pinch_ratio", "pinch_seg", "pinch_seg_68", "ext_index", "ext_index_3d",
+               "ext_autres_max", "ext_autres_max_3d"]
 
 
-def descriptor_value(name: str, s: Sample) -> float:
-    """Valeur du descripteur `name` pour une image (main présente)."""
+def descriptor_value(name: str, s: Sample) -> float | None:
+    """Valeur du descripteur `name` pour une image (main présente) ; None si indisponible."""
     if name == "pinch_ratio":
         return s.pinch_ratio
+    if name == "pinch_seg":
+        return s.pinch_seg
+    if name == "pinch_seg_68":
+        return s.pinch_seg_68
     if name == "ext_index":
         return s.extensions[0]
     if name == "ext_index_3d":
@@ -201,7 +247,9 @@ def stats_by_label(samples: list[Sample]) -> dict[str, dict[str, Stats | None]]:
         for name in DESCRIPTORS:
             values = []
             for s in selected:
-                values.append(descriptor_value(name, s))
+                value = descriptor_value(name, s)
+                if value is not None:
+                    values.append(value)
             result[label][name] = describe(values)
     return result
 
@@ -272,7 +320,10 @@ class Episode:
 
 @dataclass(frozen=True)
 class EpisodeSettings:
-    """Réglages de la simulation : ce qu'on fait varier dans le balayage."""
+    """Réglages de la simulation : ce qu'on fait varier dans le balayage.
+
+    `thresholds.enter` et `exit` s'appliquent à la mesure choisie (`measure`).
+    """
 
     rule: str
     thresholds: RuleThresholds
@@ -281,18 +332,26 @@ class EpisodeSettings:
     guard_ratio: float = 0.0  # 0 = garde-fou désactivé
     window_ms: float = 2000
     lost_timeout_ms: float = LOST_TIMEOUT_MS
+    measure: str = "ratio"
+    exit_on_fold: bool = False
+
+    def describe(self) -> str:
+        fold = ", sortie si repli" if self.exit_on_fold else ""
+        return (f"règle {self.rule}, mesure {self.measure}, enter {self.thresholds.enter:.2f}, "
+                f"exit {self.exit:.2f}, délai {self.release_grace_ms:g} ms{fold}")
 
 
 def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list[Episode]:
     """Épisodes de pincement d'une prise, en imitant la machine à états.
 
-    - Entrée / sortie : PinchHysteresis (règle, exit, délai de relâchement).
+    - Entrée / sortie : PinchHysteresis (règle, mesure, exit, délai, sortie si repli).
     - Une image sans main, ou écartée par le garde-fou de taille, ne relâche PAS le pincement
       (la machine à états ne réagit pas à une image sans main) ; seule une absence de plus de
       `lost_timeout_ms` y met fin.
     """
     hysteresis = PinchHysteresis(
-        settings.rule, settings.thresholds, settings.exit, settings.release_grace_ms
+        settings.rule, settings.thresholds, settings.exit, settings.release_grace_ms,
+        settings.exit_on_fold,
     )
     guard = HandSizeGuard(settings.guard_ratio, settings.window_ms)
     episodes: list[Episode] = []
@@ -314,7 +373,8 @@ def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list
             continue
 
         last_seen_ms = t
-        event = hysteresis.update(t, s.pinch_ratio, s.extensions, s.extensions_3d)
+        value = measure_value(s, settings.measure)
+        event = hysteresis.update(t, value, s.extensions, s.extensions_3d)
         if event == "start":
             start_ms = t
         elif event == "end":
@@ -409,9 +469,7 @@ def episode_metrics(
 
 @dataclass
 class SweepRow:
-    rule: str
-    exit: float
-    release_grace_ms: float
+    settings: EpisodeSettings
     train: EpisodeMetrics
     test: EpisodeMetrics | None
 
@@ -419,53 +477,79 @@ class SweepRow:
 def sweep(
     train: list[Sample],
     test: list[Sample] | None,
-    rules: list[str],
-    exits: list[float],
-    graces: list[float],
-    thresholds: RuleThresholds,
-    guard_ratio: float,
-    window_ms: float,
+    configurations: list[EpisodeSettings],
     click_max_ms: float,
     seconds_train: int,
     seconds_test: int,
 ) -> list[SweepRow]:
-    """Toutes les combinaisons règle × exit × délai de relâchement, sur train (et test)."""
+    """Métriques par épisode de chaque configuration, sur l'entraînement (et le test)."""
     rows = []
-    for rule in rules:
-        for exit_value in exits:
-            for grace in graces:
-                settings = EpisodeSettings(rule, thresholds, exit_value, grace, guard_ratio,
-                                           window_ms)
-                train_metrics = episode_metrics(train, settings, click_max_ms, seconds_train)
-                test_metrics = None
-                if test is not None:
-                    test_metrics = episode_metrics(test, settings, click_max_ms, seconds_test)
-                rows.append(SweepRow(rule, exit_value, grace, train_metrics, test_metrics))
+    for settings in configurations:
+        train_metrics = episode_metrics(train, settings, click_max_ms, seconds_train)
+        test_metrics = None
+        if test is not None:
+            test_metrics = episode_metrics(test, settings, click_max_ms, seconds_test)
+        rows.append(SweepRow(settings, train_metrics, test_metrics))
     return rows
 
 
-MAX_FALSE_CLICKS = 1  # toléré sur le test pour une recommandation
+MAX_FALSE_CLICKS = 1  # toléré (sur l'entraînement) pour une recommandation
 MAX_FALSE_DRAGS = 0
 
 
-def recommend(rows: list[SweepRow]) -> SweepRow | None:
+def qualifies(m: EpisodeMetrics) -> bool:
+    """Conditions minimales : aucun faux glisser, au plus un faux clic."""
+    return m.false_drags <= MAX_FALSE_DRAGS and m.false_clicks <= MAX_FALSE_CLICKS
+
+
+def ranking_key(row: SweepRow, ruptures_reliable: bool = True) -> tuple:
+    """Clé de classement (plus petite = meilleure), calculée sur l'ENTRAÎNEMENT.
+
+    - Ruptures fiables : le moins de ruptures, puis le plus de pincements répétés détectés.
+    - Ruptures non fiables (l'utilisateur a peut-être relâché pendant le pincement maintenu) :
+      le moins de faux glisser, puis de faux clics, puis le plus de répétés détectés.
+    - Enfin, le plus petit délai de relâchement (moins de latence).
+    """
+    m = row.train
+    grace = row.settings.release_grace_ms
+    if ruptures_reliable:
+        return (m.ruptures, -m.repeated_detected, grace)
+    return (m.false_drags, m.false_clicks, -m.repeated_detected, grace)
+
+
+def rank(rows: list[SweepRow], ruptures_reliable: bool = True) -> list[SweepRow]:
+    """Configurations triées : d'abord celles qui remplissent les conditions, par classement."""
+    def passing_key(row: SweepRow) -> tuple:
+        return ranking_key(row, ruptures_reliable)
+
+    def failing_key(row: SweepRow) -> tuple:
+        # Les moins mauvaises d'abord : le moins de faux glisser, puis de faux clics.
+        return (row.train.false_drags, row.train.false_clicks,
+                ranking_key(row, ruptures_reliable))
+
+    passing = []
+    failing = []
+    for row in rows:
+        if qualifies(row.train):
+            passing.append(row)
+        else:
+            failing.append(row)
+    passing.sort(key=passing_key)
+    failing.sort(key=failing_key)
+    return passing + failing
+
+
+def recommend(rows: list[SweepRow], ruptures_reliable: bool = True) -> SweepRow | None:
     """Configuration recommandée, ou None si aucune ne remplit les conditions.
 
-    Conditions, sur le TEST (sur l'entraînement s'il n'y a pas de test) : aucun faux glisser
-    et au plus un faux clic. Parmi elles : le moins de ruptures, puis le plus de pincements
-    répétés détectés, puis le plus petit délai de relâchement (moins de latence).
+    Filtres ET classement sur l'ENTRAÎNEMENT uniquement : avec des centaines de
+    configurations, choisir d'après le test reviendrait à régler les paramètres sur le test,
+    qui ne mesurerait plus rien. Les chiffres du test ne servent qu'à vérifier le choix.
     """
-    best = None
-    best_key = None
-    for row in rows:
-        m = row.test if row.test is not None else row.train
-        if m.false_drags > MAX_FALSE_DRAGS or m.false_clicks > MAX_FALSE_CLICKS:
-            continue
-        key = (m.ruptures, -m.repeated_detected, row.release_grace_ms)
-        if best_key is None or key < best_key:
-            best = row
-            best_key = key
-    return best
+    ranked = rank(rows, ruptures_reliable)
+    if ranked and qualifies(ranked[0].train):
+        return ranked[0]
+    return None
 
 
 # --- Garde-fou de taille de main ---------------------------------------------------------------

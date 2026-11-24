@@ -36,9 +36,13 @@ class PinchConfig:
     rule: str = "A"
     min_index_extension: float = 1.0
     min_index_extension_3d: float = 1.0
-    # Relâchement reconnu seulement si pinch_ratio >= exit pendant ce temps (0 = immédiat,
-    # comportement actuel). PAS ENCORE utilisé par la machine à états.
+    # Relâchement reconnu seulement si la condition de sortie tient pendant ce temps
+    # (0 = immédiat).
     release_grace_ms: float = 0
+    # Mesure comparée à enter / exit : "ratio" (pinch_ratio), "seg78", "seg68" (pinch_seg).
+    measure: str = "ratio"
+    # Sortir aussi du pincement quand les autres doigts se replient (règles C, D...).
+    exit_on_fold: bool = False
 
 
 @dataclass(frozen=True)

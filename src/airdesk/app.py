@@ -42,7 +42,7 @@ def run(
     cfg = replace(cfg, camera=camera_cfg)  # config effective, enregistrée avec le log
 
     actuator = create_actuator(dry_run, cfg.pointer.pixels_per_frame_width)
-    machine = GestureStateMachine(cfg.engagement, cfg.pinch)
+    machine = GestureStateMachine(cfg.engagement, cfg.pinch, cfg.fingers)
     pointer_filter = PointFilter(cfg.filter.min_cutoff, cfg.filter.beta, cfg.filter.d_cutoff)
 
     fps = 0.0

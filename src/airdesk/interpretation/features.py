@@ -55,6 +55,11 @@ class HandFeatures:
     finger_extensions_3d: tuple[float, float, float, float]
     index_extension_3d: float
     folded_fingers_3d: int
+    # Distance du bout du pouce au SEGMENT de l'index (dernière phalange 7-8, ou 6-8), divisée
+    # par la taille de main, en unités homogènes 2D. Contrairement à pinch_ratio (distance au
+    # seul bout de l'index), elle reste petite quand le pouce touche l'index un peu sous le bout.
+    pinch_seg: float
+    pinch_seg_68: float
 
 
 def distance_2d(a: Point, b: Point) -> float:
@@ -115,6 +120,40 @@ def finger_extensions(
     for tip in FINGER_TIPS:
         values.append(distance(landmarks[tip], center) / hand_size)
     return (values[0], values[1], values[2], values[3])
+
+
+def point_segment_distance(p: Point, a: Point, b: Point) -> float:
+    """Distance 2D du point p au segment [a, b].
+
+    On projette p sur la droite (a, b) : t = position du projeté (0 en a, 1 en b). Si t sort
+    de [0, 1], le point le plus proche est une extrémité du segment.
+    """
+    abx = b[0] - a[0]
+    aby = b[1] - a[1]
+    length_squared = abx * abx + aby * aby
+    if length_squared < 1e-12:
+        return distance_2d(p, a)
+    t = ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / length_squared
+    if t < 0:
+        t = 0.0
+    elif t > 1:
+        t = 1.0
+    closest = (a[0] + t * abx, a[1] + t * aby, 0.0)
+    return distance_2d(p, closest)
+
+
+def pinch_segment(homogeneous: list[Point], start: int, end: int = INDEX_TIP) -> float:
+    """Distance bout du pouce -> segment index [start, end], divisée par la taille de main.
+
+    `homogeneous` : points en unités homogènes (voir to_homogeneous), ou déjà normalisés
+    (normalize_landmarks : taille de main = 1, la division ne change alors rien).
+    """
+    hand_size = distance_2d(homogeneous[WRIST], homogeneous[MIDDLE_MCP])
+    if hand_size < 1e-6:
+        hand_size = 1e-6
+    distance = point_segment_distance(homogeneous[THUMB_TIP], homogeneous[start],
+                                      homogeneous[end])
+    return distance / hand_size
 
 
 def count_folded(extensions: tuple[float, ...], folded_below: float) -> int:
@@ -182,4 +221,6 @@ def compute_features(
         finger_extensions_3d=extensions_3d,
         index_extension_3d=extensions_3d[0],
         folded_fingers_3d=count_folded(extensions_3d, folded_below_3d),
+        pinch_seg=pinch_segment(homogeneous, 7),
+        pinch_seg_68=pinch_segment(homogeneous, 6),
     )

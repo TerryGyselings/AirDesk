@@ -30,7 +30,14 @@ import cv2
 
 from airdesk.capture import Camera
 from airdesk.config import PROJECT_ROOT, apply_cli_overrides, load_config
-from airdesk.interpretation.features import compute_features, normalize_landmarks
+from airdesk.interpretation.features import (
+    MIDDLE_MCP,
+    WRIST,
+    compute_features,
+    distance_2d,
+    normalize_landmarks,
+    to_homogeneous,
+)
 from airdesk.perception import HandTracker
 from airdesk.session_log import HAND_COLUMNS, build_metadata, hand_columns
 from airdesk.ui.debug_view import BONES
@@ -38,6 +45,9 @@ from airdesk.ui.debug_view import BONES
 DATASET_DIR = PROJECT_ROOT / "data" / "datasets"
 WINDOW_NAME = "AirDesk - enregistrement (q ou Echap pour arreter)"
 METRONOME_FLASH_MS = 300  # durée d'affichage de « PINCE ! » au début de chaque seconde
+# Version du protocole, notée dans le JSON : 2 = consigne du pincement maintenu précisée
+# (doigts collés, petits mouvements) et position / vitesse du poignet enregistrées.
+PROTOCOL_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -54,8 +64,11 @@ SEQUENCES = [
         ("Pince pouce-index a chaque PINCE !", "puis relache bien entre deux."),
         metronome=True,
     ),
-    Sequence("pincement_maintenu", ("Pince pouce-index et GARDE le pincement.",
-                                    "Deplace la main en pincant.")),
+    Sequence(
+        "pincement_maintenu",
+        ("Pince et GARDE pouce et index COLLES 10 s.",
+         "Petits mouvements lents, sans relacher,", "sans revenir en arriere."),
+    ),
     Sequence("poing", ("Poing ferme, pouce pose sur l'index replie.", "Bouge le poing.")),
     Sequence("poing_ouvre_ferme", ("Ouvre et ferme le poing,", "sans pincer.")),
     Sequence("main_relachee", ("Main relachee, naturelle,", "comme au repos devant l'ecran.")),
@@ -72,21 +85,54 @@ def dataset_columns() -> list[str]:
     columns = ["label", "t_in_sequence_ms", "timestamp_ms", "handedness"]
     columns += HAND_COLUMNS
     columns.append("hand_size")
+    # Position du poignet dans l'image (0 à 1, image en miroir) et sa vitesse en tailles de
+    # main par seconde : permet de vérifier si les décrochages arrivent pendant les gestes
+    # rapides. Vitesse vide à la première image et après une perte de la main.
+    columns += ["wrist_x", "wrist_y", "wrist_speed"]
     for i in range(21):
         for axis in ("x", "y", "z"):
             columns.append(f"{axis}{i}")
     return columns
 
 
-def dataset_row(label: str, t_ms: int, timestamp_ms: int, hand, features, aspect: float) -> list:
-    """Une ligne du CSV : étiquette, descripteurs, 21 points normalisés (vides sans main)."""
+def wrist_speed(hand, previous, timestamp_ms: int, aspect: float) -> float | None:
+    """Vitesse du poignet en tailles de main par seconde, depuis l'image précédente.
+
+    `previous` : (timestamp_ms, landmarks) de l'image précédente avec main, ou None.
+    Unités homogènes (x multiplié par aspect) et division par la taille de main : la valeur
+    ne dépend ni du format de l'image ni de la distance à la caméra.
+    """
+    if previous is None:
+        return None
+    previous_ms, previous_landmarks = previous
+    dt_s = (timestamp_ms - previous_ms) / 1000.0
+    if dt_s <= 0:
+        return None
+    now = to_homogeneous(hand.landmarks, aspect)
+    before = to_homogeneous(previous_landmarks, aspect)
+    hand_size = distance_2d(now[WRIST], now[MIDDLE_MCP])
+    if hand_size < 1e-6:
+        return None
+    return distance_2d(now[WRIST], before[WRIST]) / dt_s / hand_size
+
+
+def dataset_row(
+    label: str, t_ms: int, timestamp_ms: int, hand, features, aspect: float, speed=None
+) -> list:
+    """Une ligne du CSV : étiquette, descripteurs, poignet, 21 points normalisés.
+
+    Sans main, toutes les colonnes après hand_present sont vides.
+    """
     row = [label, t_ms, timestamp_ms, hand.handedness if hand is not None else ""]
     row += hand_columns(features)
     if hand is None:
         row.append("")
+        row += ["", "", ""]
         row += [""] * 63
         return row
     row.append(f"{features.hand_size:.4f}")
+    wrist_x, wrist_y, _ = hand.landmarks[WRIST]
+    row += [f"{wrist_x:.4f}", f"{wrist_y:.4f}", "" if speed is None else f"{speed:.3f}"]
     for x, y, z in normalize_landmarks(hand.landmarks, aspect):
         row += [f"{x:.4f}", f"{y:.4f}", f"{z:.4f}"]
     return row
@@ -146,6 +192,7 @@ def draw_overlay(image, hand, features, sequence, number, total, t_ms, duration_
 def run_phase(frames, tracker, cfg, aspect, sequence, number, total, duration_ms, writer):
     """Affiche (et enregistre si `writer`) pendant `duration_ms`. False si l'utilisateur quitte."""
     start_ms = None
+    previous = None  # (timestamp_ms, landmarks) de la dernière image avec main
     for frame in frames:
         if start_ms is None:
             start_ms = frame.timestamp_ms
@@ -156,13 +203,19 @@ def run_phase(frames, tracker, cfg, aspect, sequence, number, total, duration_ms
         hands = tracker.detect(frame.rgb, frame.timestamp_ms)
         hand = hands[0] if hands else None
         features = None
+        speed = None
         if hand is not None:
             features = compute_features(
                 hand.landmarks, cfg.fingers.folded_below, cfg.fingers.folded_below_3d, aspect
             )
+            speed = wrist_speed(hand, previous, frame.timestamp_ms, aspect)
+            previous = (frame.timestamp_ms, hand.landmarks)
+        else:
+            previous = None  # après une perte de la main, la vitesse repart de zéro
         if writer is not None:
             writer.writerow(
-                dataset_row(sequence.label, t_ms, frame.timestamp_ms, hand, features, aspect)
+                dataset_row(sequence.label, t_ms, frame.timestamp_ms, hand, features, aspect,
+                            speed)
             )
 
         image = draw_overlay(
@@ -201,6 +254,7 @@ def main() -> None:
         metadata = build_metadata(cfg, cam.info.summary())
         metadata["dataset"] = {
             "participant": args.participant,
+            "protocol_version": PROTOCOL_VERSION,
             "seconds": args.seconds,
             "countdown_s": args.countdown,
             "metronome": "un PINCE ! par seconde dans les séquences à métronome",

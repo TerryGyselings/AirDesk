@@ -5,6 +5,7 @@ from airdesk.interpretation.features import (
     count_folded,
     normalize_landmarks,
     palm_center,
+    point_segment_distance,
 )
 
 
@@ -163,6 +164,39 @@ def test_index_pointing_at_camera_is_short_in_2d_but_not_in_3d():
     assert abs(f.index_extension_3d - 1.51) < 0.01  # en 3D, il est bien tendu
     assert f.folded_fingers == 1
     assert f.folded_fingers_3d == 0
+
+
+def test_point_segment_distance():
+    a = (0.0, 0.0, 0.0)
+    b = (0.0, 1.0, 0.0)
+    assert point_segment_distance((0.5, 0.5, 0.0), a, b) == 0.5  # projection dans le segment
+    assert point_segment_distance((0.0, 2.0, 0.0), a, b) == 1.0  # au-delà de b : distance à b
+    assert point_segment_distance((0.0, -3.0, 0.0), a, b) == 3.0  # avant a : distance à a
+    assert point_segment_distance((1.0, 1.0, 0.0), a, a) == math.sqrt(2)  # segment réduit à a
+
+
+def test_pinch_seg_stays_small_when_the_thumb_touches_below_the_tip():
+    """Pouce posé sur la dernière phalange, sous le bout : pinch_ratio le croit écarté,
+    pinch_seg voit le contact. Hypothèse à vérifier sur les mesures (moins de ruptures)."""
+    hand = make_hand(fingers_extended=True, pinch=False)
+    hand[4] = (0.44, 0.42, 0.0)  # entre 7 (0.45) et 8 (0.35) sur l'index (x = 0.44)
+    f = compute_features(hand)
+    assert f.pinch_ratio > 0.3  # 0.07 / 0.20 = 0.35
+    assert f.pinch_seg < 0.01
+    assert f.pinch_seg_68 < 0.01
+
+
+def test_pinch_seg_does_not_depend_on_scale_or_rotation():
+    hand = make_hand(fingers_extended=True, pinch=False)
+    hand[4] = (0.40, 0.40, 0.0)
+    small = []
+    for x, y, z in hand:
+        small.append((0.5 + (x - 0.5) / 2, 0.5 + (y - 0.5) / 2, z))
+    a = compute_features(hand)
+    b = compute_features(small)
+    c = compute_features(rotate_90(hand))
+    assert abs(a.pinch_seg - b.pinch_seg) < 1e-9
+    assert abs(a.pinch_seg - c.pinch_seg) < 1e-9
 
 
 def test_count_folded_uses_the_threshold():

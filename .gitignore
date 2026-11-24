@@ -18,6 +18,7 @@ models/
 data/raw/
 data/logs/
 data/datasets/
+data/analyses/
 *.mp4
 *.avi
 

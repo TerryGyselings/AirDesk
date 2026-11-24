@@ -1,5 +1,6 @@
-from airdesk.config import EngagementConfig, PinchConfig
+from airdesk.config import EngagementConfig, FingersConfig, PinchConfig, load_config
 from airdesk.interpretation.features import HandFeatures
+from airdesk.interpretation.pinch_rules import MEASURES, RULES
 from airdesk.interpretation.state_machine import (
     Click,
     GestureStateMachine,
@@ -10,8 +11,15 @@ from airdesk.interpretation.state_machine import (
 )
 
 
-def features(pinch_ratio: float, extended_fingers: int, extension: float) -> HandFeatures:
-    """Descripteurs simplifiés : même extension (bout -> paume) pour les quatre doigts."""
+def features(
+    pinch_ratio: float, extended_fingers: int, extension: float, pinch_seg: float | None = None
+) -> HandFeatures:
+    """Descripteurs simplifiés : même extension (bout -> paume) pour les quatre doigts.
+
+    `pinch_seg` vaut pinch_ratio par défaut.
+    """
+    if pinch_seg is None:
+        pinch_seg = pinch_ratio
     extensions = (extension, extension, extension, extension)
     folded = 4 if extension < 0.8 else 0
     return HandFeatures(
@@ -25,6 +33,8 @@ def features(pinch_ratio: float, extended_fingers: int, extension: float) -> Han
         finger_extensions_3d=extensions,
         index_extension_3d=extension,
         folded_fingers_3d=folded,
+        pinch_seg=pinch_seg,
+        pinch_seg_68=pinch_seg,
     )
 
 
@@ -141,3 +151,108 @@ def test_lost_hand_returns_to_idle_and_releases_drag():
     events = m.update(t + 1500, None, None)  # perdue depuis 1100 ms
     assert m.state == State.IDLE
     assert Release() in events
+
+
+# --- Configuration choisie d'après les mesures : règle D, délai de relâchement 66 ms -----------
+# Les tests ci-dessus utilisent PinchConfig() par défaut, c'est-à-dire la règle A d'origine :
+# ils vérifient que « rule: A » redonne exactement l'ancien comportement.
+
+# Poing fermé, pouce posé sur l'index replié : pinch_ratio petit, tous les doigts repliés.
+FIST_THUMB_ON_INDEX = features(pinch_ratio=0.10, extended_fingers=0, extension=0.4)
+ENGAGEMENT = EngagementConfig(hold_ms=300, lost_timeout_ms=1000)
+FINGERS = FingersConfig(folded_below=0.87, folded_below_3d=0.91)
+
+
+def machine_d(release_grace_ms=66, exit_on_fold=False, measure="ratio"):
+    pinch = PinchConfig(rule="D", release_grace_ms=release_grace_ms, exit_on_fold=exit_on_fold,
+                        measure=measure)
+    return GestureStateMachine(ENGAGEMENT, pinch, FINGERS)
+
+
+def feed(m, t, hand, duration_ms):
+    """Envoie la même main pendant `duration_ms` (une image toutes les 33 ms)."""
+    events = []
+    end = t + duration_ms
+    while t < end:
+        events += m.update(t, hand, P)
+        t += 33
+    return t, events
+
+
+def test_rule_a_takes_a_fist_for_a_pinch():
+    """Le problème d'origine, reproduit : avec la règle A, le poing finit en glisser."""
+    m = new_machine()
+    t = activate(m)
+    t, events = feed(m, t, FIST_THUMB_ON_INDEX, 600)
+    assert Press() in events
+    assert m.state == State.DRAGGING
+
+
+def test_rule_d_ignores_a_fist():
+    m = machine_d()
+    t = activate(m)
+    t, events = feed(m, t, FIST_THUMB_ON_INDEX, 600)
+    assert events == []
+    assert m.state == State.ACTIVE
+
+
+def test_rule_d_still_clicks_with_the_release_grace():
+    """Le relâchement n'est reconnu qu'après 66 ms : le clic arrive 2 images plus tard."""
+    m = machine_d()
+    t = activate(m)
+    m.update(t, PINCH, P)
+    assert m.state == State.PINCHING
+    assert m.update(t + 150, OPEN, P) == []  # relâchement en cours, pas encore confirmé
+    assert m.update(t + 183, OPEN, P) == []
+    events = m.update(t + 216, OPEN, P)  # 66 ms après le début du relâchement
+    assert Click() in events
+    assert m.state == State.ACTIVE
+
+
+def test_release_grace_keeps_a_drag_through_a_one_frame_glitch():
+    """Une image où le suivi « ouvre » les doigts : sans délai, le glisser est lâché."""
+    for grace, still_dragging in [(0, False), (66, True)]:
+        m = machine_d(release_grace_ms=grace)
+        t = activate(m)
+        m.update(t, PINCH, P)
+        m.update(t + 400, PINCH, P)
+        assert m.state == State.DRAGGING
+        events = m.update(t + 433, OPEN, P)  # décrochage d'une image
+        events += m.update(t + 466, PINCH, P)
+        assert (m.state == State.DRAGGING) == still_dragging
+        assert (Release() in events) != still_dragging
+
+
+def test_exit_on_fold_releases_a_drag_when_the_hand_closes():
+    """Avec exit_on_fold : refermer la main en poing pendant un glisser le lâche, même si le
+    pouce reste sur l'index."""
+    m = machine_d(release_grace_ms=0, exit_on_fold=True)
+    t = activate(m)
+    m.update(t, PINCH, P)
+    m.update(t + 400, PINCH, P)
+    assert m.state == State.DRAGGING
+    events = m.update(t + 433, FIST_THUMB_ON_INDEX, P)
+    assert Release() in events
+    assert m.state == State.ACTIVE
+
+
+def test_measure_seg78_is_used():
+    """Pouce posé sous le bout de l'index : pinch_ratio 0.6 (écarté), pinch_seg 0.1 (contact)."""
+    thumb_below_tip = features(pinch_ratio=0.6, extended_fingers=3, extension=1.4,
+                               pinch_seg=0.1)
+    with_ratio = machine_d(measure="ratio")
+    t = activate(with_ratio)
+    with_ratio.update(t, thumb_below_tip, P)
+    assert with_ratio.state == State.ACTIVE
+    with_seg = machine_d(measure="seg78")
+    t = activate(with_seg)
+    with_seg.update(t, thumb_below_tip, P)
+    assert with_seg.state == State.PINCHING
+
+
+def test_project_configuration_builds_a_machine():
+    """config/gestures.yaml est valide : la machine se construit avec la règle choisie."""
+    cfg = load_config(local_path=None)
+    m = GestureStateMachine(cfg.engagement, cfg.pinch, cfg.fingers)
+    assert m.pinch.rule in RULES
+    assert m.pinch.measure in MEASURES

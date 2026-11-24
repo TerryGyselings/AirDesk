@@ -16,18 +16,24 @@ pinch:
   # Un pincement plus court que ça = clic. Plus long = saisie (glisser).
   click_max_ms: 400
   # Règle anti-poing (poing fermé = pouce sur l'index replié = faux pincement).
-  # PAS ENCORE utilisée par la machine à états : à décider après mesures
-  # (scripts/record_gestures.py puis scripts/analyse_gestures.py).
-  # A = règle actuelle (pinch_ratio seul) ; B = A + index tendu ;
+  # A = d'origine (mesure seule) ; B = A + index tendu ;
   # C = B + au moins un autre doigt non replié ; D = A + au moins un autre doigt non replié
   # (sans condition sur l'index) ; B3D / C3D / D3D = idem avec la profondeur.
-  rule: A
-  # Extension minimale de l'index (bout -> centre de paume / taille de main). Provisoire.
-  min_index_extension: 1.0
-  min_index_extension_3d: 1.0
-  # Le pincement n'est relâché que si pinch_ratio reste >= exit pendant ce temps (ms).
-  # 0 = relâchement immédiat (comportement actuel). PAS ENCORE utilisé.
-  release_grace_ms: 0
+  # Choix du 2026-11-24 (2 sessions de P01, voir docs/journal.md) : D, ratio, délai 66 ms,
+  # sans sortie sur repli. Mettre « rule: A » et « release_grace_ms: 0 » pour revenir au
+  # comportement d'origine et comparer.
+  rule: D
+  # Extension minimale de l'index (règles B, C). Appris sur l'entraînement, non utilisé par D.
+  min_index_extension: 0.80
+  min_index_extension_3d: 0.86
+  # Le pincement n'est relâché que si la condition de sortie tient pendant ce temps (ms).
+  # 0 = relâchement immédiat. 66 ms = 2 images à 30 i/s.
+  release_grace_ms: 66
+  # Mesure comparée à enter / exit : ratio (pouce -> bout de l'index), seg78 / seg68
+  # (pouce -> segment 7-8 ou 6-8 de l'index). enter / exit doivent être réglés pour elle.
+  measure: ratio
+  # Sortir aussi du pincement quand les autres doigts se replient (règles C, D...).
+  exit_on_fold: false
 
 quality:
   # Garde-fou : une image est ignorée (comme « main absente ») si hand_size tombe sous
@@ -37,10 +43,11 @@ quality:
   hand_size_window_ms: 2000
 
 fingers:
-  # Extension sous laquelle un doigt est compté comme replié (tendu ≈ 1,5 ; replié ≈ 0,4).
-  # Provisoire : à régler avec scripts/analyse_gestures.py.
-  folded_below: 0.8
-  folded_below_3d: 0.8
+  # Extension sous laquelle un doigt est compté comme replié (bout -> centre de paume /
+  # taille de main). Appris sur l'entraînement (scripts/analyse_gestures.py) : séparation
+  # poing / pincement de « ext_autres_max », marge +0,26 (3D : +0,22).
+  folded_below: 0.87
+  folded_below_3d: 0.91
 
 pointer:
   # Gain contrôle/affichage (pointage relatif, comme un pavé tactile) :

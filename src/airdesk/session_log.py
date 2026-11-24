@@ -43,6 +43,8 @@ HAND_COLUMNS = [
     "ext3d_ring",
     "ext3d_pinky",
     "folded_fingers_3d",
+    "pinch_seg",  # distance pouce -> segment 7-8 de l'index / taille de main
+    "pinch_seg_68",  # distance pouce -> segment 6-8 de l'index / taille de main
 ]
 
 COLUMNS = (
@@ -122,6 +124,8 @@ def hand_columns(features) -> list:
     for value in features.finger_extensions_3d:
         row.append(f"{value:.4f}")
     row.append(features.folded_fingers_3d)
+    row.append(f"{features.pinch_seg:.4f}")
+    row.append(f"{features.pinch_seg_68:.4f}")
     return row
 
 
