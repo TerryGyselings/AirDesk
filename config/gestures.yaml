@@ -19,11 +19,22 @@ pinch:
   # PAS ENCORE utilisée par la machine à états : à décider après mesures
   # (scripts/record_gestures.py puis scripts/analyse_gestures.py).
   # A = règle actuelle (pinch_ratio seul) ; B = A + index tendu ;
-  # C = B + au moins un autre doigt non replié ; B3D / C3D = idem avec la profondeur.
+  # C = B + au moins un autre doigt non replié ; D = A + au moins un autre doigt non replié
+  # (sans condition sur l'index) ; B3D / C3D / D3D = idem avec la profondeur.
   rule: A
   # Extension minimale de l'index (bout -> centre de paume / taille de main). Provisoire.
   min_index_extension: 1.0
   min_index_extension_3d: 1.0
+  # Le pincement n'est relâché que si pinch_ratio reste >= exit pendant ce temps (ms).
+  # 0 = relâchement immédiat (comportement actuel). PAS ENCORE utilisé.
+  release_grace_ms: 0
+
+quality:
+  # Garde-fou : une image est ignorée (comme « main absente ») si hand_size tombe sous
+  # min_hand_size_ratio × la médiane des hand_size_window_ms dernières millisecondes
+  # (main de profil ou coupée). 0 = désactivé. PAS ENCORE utilisé.
+  min_hand_size_ratio: 0.0
+  hand_size_window_ms: 2000
 
 fingers:
   # Extension sous laquelle un doigt est compté comme replié (tendu ≈ 1,5 ; replié ≈ 0,4).

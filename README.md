@@ -122,9 +122,13 @@ python scripts/analyse_gestures.py data/datasets/A.csv data/datasets/B.csv --tes
   de chaque image, plus un `.json` des réglages. **Aucune image** ; `--participant` est un code
   pseudonyme, jamais un nom.
 - `analyse_gestures.py` donne, par étiquette, les distributions de `pinch_ratio` et des
-  extensions de doigts, compare les règles A, B, C (et B/C en 3D) avec une matrice de
-  confusion, et propose des seuils avec leur marge. Les seuils sont appris sur les fichiers
-  d'entraînement et évalués sur le fichier `--test` ; sans `--test`, les résultats sont optimistes.
+  extensions de doigts, compare les règles A, B, C, D (et leurs versions 3D) avec une
+  matrice de confusion, et propose des seuils avec leur marge. Il simule ensuite les
+  **épisodes** de pincement (ce que ressent l'utilisateur) pour plusieurs valeurs de `exit` et
+  de délai de relâchement : ruptures d'un glisser, faux clics, faux glisser, pincements
+  répétés détectés, et recommande la meilleure configuration. Les seuils sont appris sur les
+  fichiers d'entraînement et évalués sur le fichier `--test` ; sans `--test`, les résultats
+  sont optimistes. Le pincement « index vers la caméra » est hors vocabulaire (information).
 - Descripteur clé, l'**extension** d'un doigt : distance bout du doigt → centre de la paume,
   divisée par la taille de la main (tendu ≈ 1,5, replié ≈ 0,4). Calculée en 2D et en 3D :
   un index pointé vers la caméra paraît court en 2D (perspective).

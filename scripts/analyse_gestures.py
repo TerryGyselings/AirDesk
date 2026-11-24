@@ -16,6 +16,7 @@ Les seuils en vigueur (enter, exit...) sont lus dans le .json de chaque jeu de d
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 from airdesk.config import load_config
@@ -23,15 +24,21 @@ from airdesk.gesture_analysis import (
     DESCRIPTORS,
     EPISODE_LABELS,
     NEGATIVE_LABELS,
+    OUT_OF_VOCABULARY_LABELS,
     POSITIVE_LABEL,
+    SweepRow,
     confusion,
     count_episodes,
     count_sequences,
     detection_rate,
     labels_in_order,
+    propose_hand_size_ratio,
     propose_thresholds,
     read_dataset,
+    recommend,
+    rejected_by_guard,
     stats_by_label,
+    sweep,
     thresholds_from_proposals,
 )
 from airdesk.interpretation.pinch_rules import RULES, RuleThresholds
@@ -44,12 +51,28 @@ SHORT_NAMES = {
     "main_relachee": "relachee",
     "parasites": "parasites",
     "pincements_repetes": "repetes",
-    "pincement_vers_camera": "vers cam.",
+    "pincement_vers_camera": "hors voc.",
 }
 
+# Balayage des métriques par épisode.
+SWEEP_RULES = ["A", "D", "D3D"]
+SWEEP_EXITS = [0.40, 0.50]
+SWEEP_GRACES = [0, 66, 100, 150]
 
-def load_settings(csv_paths: list[Path]) -> tuple[RuleThresholds, float, int]:
-    """(seuils actuels, exit, durée d'une séquence en s) d'après les .json des jeux de données."""
+
+@dataclass
+class Settings:
+    """Réglages lus dans les .json des jeux de données."""
+
+    thresholds: RuleThresholds
+    exit: float
+    click_max_ms: float
+    window_ms: float
+    seconds: int
+    participants: list[str]
+
+
+def load_settings(csv_paths: list[Path]) -> Settings:
     found = []
     for path in csv_paths:
         json_path = path.with_suffix(".json")
@@ -59,7 +82,6 @@ def load_settings(csv_paths: list[Path]) -> tuple[RuleThresholds, float, int]:
             print(f"ATTENTION : {json_path.name} introuvable.")
     if found:
         config = found[0]["config"]
-        seconds = found[0].get("dataset", {}).get("seconds", 10)
         for other in found[1:]:
             if other["config"]["pinch"] != config["pinch"] or \
                     other["config"]["fingers"] != config["fingers"]:
@@ -67,15 +89,23 @@ def load_settings(csv_paths: list[Path]) -> tuple[RuleThresholds, float, int]:
                       " ceux du premier sont utilisés.")
         pinch = config["pinch"]
         fingers = config["fingers"]
+        quality = config.get("quality", {})
+        seconds = found[0].get("dataset", {}).get("seconds", 10)
+        participants = []
+        for metadata in found:
+            participants.append(metadata.get("dataset", {}).get("participant", "?"))
     else:
         print("ATTENTION : aucun .json, seuils lus dans la config ACTUELLE.")
         cfg = load_config()
         pinch = {"enter": cfg.pinch.enter, "exit": cfg.pinch.exit,
+                 "click_max_ms": cfg.pinch.click_max_ms,
                  "min_index_extension": cfg.pinch.min_index_extension,
                  "min_index_extension_3d": cfg.pinch.min_index_extension_3d}
         fingers = {"folded_below": cfg.fingers.folded_below,
                    "folded_below_3d": cfg.fingers.folded_below_3d}
+        quality = {"hand_size_window_ms": cfg.quality.hand_size_window_ms}
         seconds = 10
+        participants = ["?"]
     thresholds = RuleThresholds(
         enter=pinch["enter"],
         min_index_extension=pinch["min_index_extension"],
@@ -83,7 +113,18 @@ def load_settings(csv_paths: list[Path]) -> tuple[RuleThresholds, float, int]:
         min_index_extension_3d=pinch["min_index_extension_3d"],
         folded_below_3d=fingers["folded_below_3d"],
     )
-    return thresholds, pinch["exit"], seconds
+    return Settings(
+        thresholds=thresholds,
+        exit=pinch["exit"],
+        click_max_ms=pinch["click_max_ms"],
+        window_ms=quality.get("hand_size_window_ms", 2000),
+        seconds=seconds,
+        participants=participants,
+    )
+
+
+def title(text: str) -> None:
+    print(f"\n================ {text} ================\n")
 
 
 def print_distributions(samples) -> None:
@@ -106,10 +147,11 @@ def print_distributions(samples) -> None:
 
 
 def print_rules(samples, thresholds: RuleThresholds, exit_: float, seconds: int) -> None:
+    """Matrice image par image + épisodes (sans délai ni garde-fou) pour chaque règle."""
     header = f"  {'règle':<5} | {'rappel pincement':<17}"
     for label in NEGATIVE_LABELS:
         header += f" | FP {SHORT_NAMES[label]:<9}"
-    for label in EPISODE_LABELS:
+    for label in EPISODE_LABELS + OUT_OF_VOCABULARY_LABELS:
         header += f" | {SHORT_NAMES[label]:<9}"
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -124,9 +166,63 @@ def print_rules(samples, thresholds: RuleThresholds, exit_: float, seconds: int)
             expected = seconds * count_sequences(samples, label)
             found = count_episodes(samples, label, rule, thresholds, exit_)
             line += f" | {f'{found}/{expected}':<9}"
+        for label in OUT_OF_VOCABULARY_LABELS:
+            found = count_episodes(samples, label, rule, thresholds, exit_)
+            line += f" | {found:<9}"
         print(line)
     print("  rappel = images de pincement maintenu reconnues ; FP x/n = faux pincements sur n")
-    print("  images ; colonnes répétés / vers caméra = épisodes détectés / pincements attendus.")
+    print("  images ; repetes = épisodes détectés / attendus ; hors voc. = épisodes dans le")
+    print("  pincement index vers la caméra (hors vocabulaire, pour information).")
+
+
+def pair(train_value, test_value) -> str:
+    if test_value is None:
+        return f"{train_value}"
+    return f"{train_value} / {test_value}"
+
+
+def print_sweep(rows: list[SweepRow], has_test: bool) -> None:
+    print(f"  {'règle':<5} {'exit':>5} {'délai':>6} | {'ruptures':<9} | {'faux clics':<10} | "
+          f"{'faux gliss.':<11} | {'répétés':<13} | {'hors voc.':<9}")
+    print("  " + "-" * 90)
+    for row in rows:
+        tr = row.train
+        te = row.test
+        ruptures = pair(tr.ruptures, te.ruptures if te else None)
+        clicks = pair(tr.false_clicks, te.false_clicks if te else None)
+        drags = pair(tr.false_drags, te.false_drags if te else None)
+        repeated_test = None
+        if te is not None:
+            repeated_test = f"{te.repeated_detected}/{te.repeated_expected}"
+        repeated = pair(f"{tr.repeated_detected}/{tr.repeated_expected}", repeated_test)
+        out_of_vocabulary = pair(tr.out_of_vocabulary, te.out_of_vocabulary if te else None)
+        print(
+            f"  {row.rule:<5} {row.exit:5.2f} {row.release_grace_ms:>4} ms"
+            f" | {ruptures:<9} | {clicks:<10} | {drags:<11} | {repeated:<13}"
+            f" | {out_of_vocabulary:<9}"
+        )
+    where = "entraînement / test" if has_test else "entraînement"
+    print(f"  Cellules : {where}. ruptures = sorties de pincement pendant le pincement maintenu")
+    print("  (idéal 0) ; faux clics / faux glisser = faux épisodes courts / longs sur poing,")
+    print("  poing o/f, main relâchée, parasites ; répétés = détectés / attendus.")
+
+    best = recommend(rows)
+    on = "le TEST" if has_test else "l'ENTRAÎNEMENT (optimiste : pas de test)"
+    print(f"\n  Recommandation (sur {on} : 0 faux glisser, au plus 1 faux clic ; puis le moins")
+    print("  de ruptures, le plus de répétés détectés, le plus petit délai) :")
+    if best is None:
+        print("  -> AUCUNE configuration ne remplit les conditions.")
+        return
+    tr = best.train
+    te = best.test
+    print(f"  -> règle {best.rule}, exit {best.exit:.2f}, release_grace_ms {best.release_grace_ms}")
+    print(f"     entraînement : {tr.ruptures} rupture(s), {tr.false_clicks} faux clic(s), "
+          f"{tr.false_drags} faux glisser, répétés {tr.repeated_detected}/"
+          f"{tr.repeated_expected}")
+    if te is not None:
+        print(f"     test         : {te.ruptures} rupture(s), {te.false_clicks} faux clic(s), "
+              f"{te.false_drags} faux glisser, répétés {te.repeated_detected}/"
+              f"{te.repeated_expected}")
 
 
 def main() -> None:
@@ -137,31 +233,40 @@ def main() -> None:
     parser.add_argument("--exit", type=float, default=None, help="tester une autre valeur")
     args = parser.parse_args()
 
-    current, exit_, seconds = load_settings(args.train)
+    settings = load_settings(args.train)
+    current = settings.thresholds
     if args.enter is not None:
         current = RuleThresholds(args.enter, current.min_index_extension, current.folded_below,
                                  current.min_index_extension_3d, current.folded_below_3d)
-    if args.exit is not None:
-        exit_ = args.exit
+    exit_ = settings.exit if args.exit is None else args.exit
 
     train = []
     for path in args.train:
         train += read_dataset(path)
+    test = None
+    test_settings = None
     print(f"ENTRAÎNEMENT : {', '.join(str(p) for p in args.train)} ({len(train)} images)")
     if args.test is not None:
-        print(f"TEST         : {args.test}")
+        test = read_dataset(args.test)
+        test_settings = load_settings([args.test])
+        print(f"TEST         : {args.test} ({len(test)} images)")
+        shared = set(settings.participants) & set(test_settings.participants)
+        if shared:
+            print(f"\nATTENTION : participant(s) {', '.join(sorted(shared))} présent(s) dans "
+                  "l'entraînement ET le test.")
+            print("Le test mesure la stabilité d'une séance à l'autre, pas la généralisation")
+            print("à une personne nouvelle.")
     else:
         print("\nATTENTION : pas de fichier --test. Les résultats ci-dessous sont OPTIMISTES :")
         print("les seuils sont évalués sur les données mêmes qui ont servi à les choisir.")
     print(f"\nSeuils en vigueur à l'enregistrement : enter={current.enter}, exit={exit_}, "
-          f"min_index_extension={current.min_index_extension} "
-          f"(3D {current.min_index_extension_3d}), folded_below={current.folded_below} "
+          f"click_max_ms={settings.click_max_ms}, folded_below={current.folded_below} "
           f"(3D {current.folded_below_3d})")
 
-    print("\n================ ENTRAÎNEMENT : distributions ================\n")
+    title("ENTRAÎNEMENT : distributions")
     print_distributions(train)
 
-    print("\n================ ENTRAÎNEMENT : seuils proposés ================")
+    title("ENTRAÎNEMENT : seuils proposés")
     print("Parmi les images que la règle A accepte (pinch_ratio < enter) : positifs = pincement")
     print("maintenu, négatifs = poing, parasites... (les faux pincements actuels).\n")
     proposals = propose_thresholds(train, current.enter)
@@ -175,26 +280,61 @@ def main() -> None:
               f"{p.p5_positives:.2f}, P95 négatifs {p.p95_negatives:.2f} ; Youden "
               f"{p.youden_threshold:.2f}, J={p.youden_j:.2f} ; n={p.n_positives}/{p.n_negatives})"
               f"  {verdict}")
-    stats = stats_by_label(train)
-    positive_ratio = stats.get(POSITIVE_LABEL, {}).get("pinch_ratio")
+    positive_ratio = stats_by_label(train).get(POSITIVE_LABEL, {}).get("pinch_ratio")
     if positive_ratio is not None and positive_ratio.p95 >= current.enter:
         print(f"\n  Contrôle de enter : P95 du pinch_ratio en pincement maintenu = "
-              f"{positive_ratio.p95:.2f} >= enter ({current.enter}) : des pincements réels "
-              "passent au-dessus du seuil d'entrée.")
-
+              f"{positive_ratio.p95:.2f} >= enter ({current.enter}) : des images de vrai "
+              "pincement passent au-dessus du seuil d'entrée.")
     learned = thresholds_from_proposals(proposals, current)
-    print(f"\nSeuils utilisés pour les règles B/C : min_index_extension="
+    print(f"\nSeuils utilisés pour B/C/D : min_index_extension="
           f"{learned.min_index_extension:.2f} (3D {learned.min_index_extension_3d:.2f}), "
           f"folded_below={learned.folded_below:.2f} (3D {learned.folded_below_3d:.2f})")
 
-    print("\n================ ENTRAÎNEMENT : règles ================\n")
-    print_rules(train, learned, exit_, seconds)
+    title("ENTRAÎNEMENT : règles, image par image")
+    print_rules(train, learned, exit_, settings.seconds)
+    if test is not None:
+        title(f"TEST : règles, image par image ({len(test)} images, mêmes seuils)")
+        print_rules(test, learned, exit_, test_settings.seconds)
 
-    if args.test is not None:
-        test = read_dataset(args.test)
-        _, _, test_seconds = load_settings([args.test])  # durée des séquences du fichier test
-        print(f"\n================ TEST ({len(test)} images, mêmes seuils) ================\n")
-        print_rules(test, learned, exit_, test_seconds)
+    title("Garde-fou taille de main (appris sur l'entraînement)")
+    print("Pincement maintenu après 1 s : images saines (pinch_ratio < exit) contre images")
+    print(f"« décrochées » (pinch_ratio >= exit) ; rapport = hand_size / médiane des "
+          f"{settings.window_ms:g} ms précédentes.\n")
+    guard = propose_hand_size_ratio(train, exit_, settings.window_ms)
+    guard_ratio = 0.0
+    if guard is None:
+        print("  Pas de proposition : aucune image décrochée (ou aucune saine).")
+    else:
+        verdict = "OK" if guard.margin > 0 else "CHEVAUCHEMENT : le rapport sépare mal"
+        print(f"  min_hand_size_ratio proposé : {guard.threshold:.2f}  (marge {guard.margin:+.2f}"
+              f" ; P5 saines {guard.p5_positives:.2f}, P95 décrochées "
+              f"{guard.p95_negatives:.2f} ; Youden {guard.youden_threshold:.2f}, "
+              f"J={guard.youden_j:.2f} ; n={guard.n_positives}/{guard.n_negatives})  {verdict}")
+    if guard is not None and guard.margin <= 0:
+        print("\n  -> Garde-fou NON RETENU : les images décrochées n'ont pas une taille de main")
+        print("     anormale ; un seuil sur ce rapport écarterait surtout des images saines.")
+    elif guard is not None:
+        guard_ratio = guard.threshold
+        datasets = [("entraînement", train)]
+        if test is not None:
+            datasets.append(("test", test))
+        for name, samples in datasets:
+            print(f"\n  Images écartées à {guard_ratio:.2f} ({name}) :")
+            for label, (rejected, present) in rejected_by_guard(
+                samples, guard_ratio, settings.window_ms
+            ).items():
+                share = 100 * rejected / present if present else 0.0
+                print(f"    {label:<22} {rejected:>4}/{present:<4} ({share:4.1f} %)")
+
+    test_seconds = test_settings.seconds if test_settings else settings.seconds
+    variants = [("SANS garde-fou", 0.0)]
+    if guard_ratio > 0:
+        variants.append((f"AVEC garde-fou ({guard_ratio:.2f})", guard_ratio))
+    for label, ratio in variants:
+        title(f"Épisodes, {label}")
+        rows = sweep(train, test, SWEEP_RULES, SWEEP_EXITS, SWEEP_GRACES, learned, ratio,
+                     settings.window_ms, settings.click_max_ms, settings.seconds, test_seconds)
+        print_sweep(rows, test is not None)
 
 
 if __name__ == "__main__":

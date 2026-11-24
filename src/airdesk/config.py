@@ -36,6 +36,17 @@ class PinchConfig:
     rule: str = "A"
     min_index_extension: float = 1.0
     min_index_extension_3d: float = 1.0
+    # Relâchement reconnu seulement si pinch_ratio >= exit pendant ce temps (0 = immédiat,
+    # comportement actuel). PAS ENCORE utilisé par la machine à états.
+    release_grace_ms: float = 0
+
+
+@dataclass(frozen=True)
+class QualityConfig:
+    """Garde-fou de taille de main (interpretation/quality.py). PAS ENCORE branché."""
+
+    min_hand_size_ratio: float = 0.0  # 0 = désactivé
+    hand_size_window_ms: float = 2000
 
 
 @dataclass(frozen=True)
@@ -77,6 +88,7 @@ class Config:
     filter: FilterConfig
     camera: CameraConfig
     fingers: FingersConfig
+    quality: QualityConfig
 
 
 def read_yaml(path: Path) -> dict:
@@ -124,6 +136,7 @@ def load_config(path: Path | None = None, local_path: Path | None = LOCAL_CONFIG
         filter=FilterConfig(**raw.get("filter", {})),
         camera=CameraConfig(**raw.get("camera", {})),
         fingers=FingersConfig(**raw.get("fingers", {})),
+        quality=QualityConfig(**raw.get("quality", {})),
     )
 
 

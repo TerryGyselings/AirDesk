@@ -82,3 +82,33 @@ Ce journal sert de matière première au rapport final.
   caméra), puis supprimées.
 - À faire : enregistrer (plusieurs sessions, plusieurs participants), analyser, puis choisir
   la règle et ses seuils.
+
+## 2026-11-24 — Règle D, métriques par épisode (2 sessions de P01)
+
+- Données : entraînement 16-00-54, test 16-03-49, même participant (P01) : le test mesure la
+  stabilité d'une séance à l'autre, pas la généralisation à une autre personne. Main deux
+  fois plus petite au test (hand_size médiane 0,116 contre 0,212) : assis plus loin.
+- Constats image par image (seuils appris sur l'entraînement) :
+  - `ext_autres_max` sépare poing et pincement (marge +0,26, seuil 0,87 ; 3D : +0,22, 0,91) ;
+    l'extension de l'index non (chevauchement : l'index se plie pour pincer) ;
+  - B / C : rappel test 35-37 % ; D : 58 % (A : 69 %), 7 faux positifs sur 299 images de poing
+    au test contre 126 pour A.
+- Décision : le pincement « index vers la caméra » (autres doigts repliés) sort du vocabulaire.
+- Nouvelle règle D (et D3D) = A + au moins un doigt parmi majeur/annulaire/auriculaire non
+  replié, sans condition sur l'index.
+- Garde-fou de taille de main (hand_size / médiane des 2 s précédentes) : **réfuté**. Les
+  images « décrochées » du pincement maintenu ont une taille de main normale (P95 du rapport
+  1,13 contre P5 0,94 pour les images saines, J = 0). Code conservé, désactivé (0).
+- Les « ruptures » du pincement maintenu sont des plages de 0,6 à 0,8 s avec pinch_ratio
+  ≈ 0,9-1,0, taille de main normale, doigts tendus, à intervalle régulier (~2,5 s) : soit de
+  vraies réouvertures pendant le déplacement, soit un décrochage du pouce lié au mouvement.
+  Un délai de relâchement (66-150 ms) ne les absorbe pas. À éclaircir (question posée ; le jeu
+  de données ne garde pas la position absolue de la main, donc pas la vitesse).
+- Métriques par épisode (simulation fidèle à la machine : une image sans main ne relâche pas,
+  seule une absence > 1 s le fait) : aucune configuration (A/D/D3D × exit 0,40/0,50 × délai
+  0/66/100/150 ms) n'atteint 0 faux glisser et ≤ 1 faux clic au test.
+- Cause principale des faux glisser de D : la sortie ne regarde que pinch_ratio. Un poing
+  entré par erreur (un doigt dépasse un instant le seuil) reste « pincé » 5,9 s. Piste :
+  appliquer aussi la condition « autre doigt ouvert » pour rester en pincement. Autre source :
+  main relâchée avec pinch_ratio ≈ 0,3-0,4, entre enter et exit.
+- Rien n'est branché sur la machine à états.
