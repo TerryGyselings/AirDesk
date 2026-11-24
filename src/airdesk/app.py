@@ -16,16 +16,31 @@ import cv2
 
 from airdesk.actuator import create_actuator, detect_screen
 from airdesk.capture import Camera
-from airdesk.config import apply_cli_overrides, load_config
+from airdesk.config import LOCAL_CONFIG_PATH, apply_cli_overrides, load_config, save_zone
 from airdesk.interpretation import GestureStateMachine, State, compute_features
 from airdesk.interpretation.features import MIDDLE_MCP, WRIST, distance_2d, wrist_speed
 from airdesk.interpretation.hand_selection import HandCandidate, HandSelector
-from airdesk.interpretation.pointing import zone_to_screen
+from airdesk.interpretation.pointing import (
+    TARGETS,
+    StillnessDetector,
+    center_offset,
+    target_position,
+    zone_from_corners,
+    zone_to_screen,
+)
 from airdesk.perception import HandTracker, PointFilter
 from airdesk.session_log import SessionLog, build_metadata
 from airdesk.ui import draw_debug
+from airdesk.ui.calibration_view import (
+    draw_capture,
+    draw_refusal,
+    draw_validation,
+    make_canvas,
+)
+from airdesk.ui.debug_view import IGNORED_COLOR, draw_hand
 
 WINDOW_NAME = "AirDesk - debug (q ou Echap pour quitter)"
+CALIBRATION_WINDOW = "AirDesk - etalonnage"
 SLOW_CAMERA_FPS = 25
 
 
@@ -190,3 +205,162 @@ def run(
 
     cv2.destroyAllWindows()
 
+
+# --- Étalonnage guidé de la zone d'interaction (`airdesk --calibrate`) -------------------------
+
+KEY_ENTER = 13
+KEY_ESCAPE = 27
+KEY_BACKSPACE = 8
+REACHED_DISTANCE = 0.06  # validation : coin « atteint » si le point passe à moins de 6 % de l'écran
+
+
+def calibrate(
+    camera_index: int | None = None,
+    config_path: Path | None = None,
+    backend: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> None:
+    """Étalonnage guidé, à son rythme : 5 cibles en plein écran, puis validation.
+
+    Pour chaque cible (centre, haut-gauche, haut-droite, bas-droite, bas-gauche), la main
+    pilote est capturée quand elle reste immobile 1 s (interpretation/pointing.py). Les 4 coins
+    donnent la zone, le centre sert de contrôle. Validation : un point suit la main avec la
+    nouvelle zone, sans toucher à la vraie souris. Entrée enregistre dans config/local.yaml.
+    """
+    cfg = load_config(config_path)
+    cal = cfg.calibration
+    camera_cfg = apply_cli_overrides(cfg.camera, camera_index, backend, width, height)
+    forced_backend = None if camera_cfg.backend == "auto" else camera_cfg.backend
+
+    screen = detect_screen("primary")
+    canvas_w = screen.width // 2  # dessiné à mi-résolution, étiré en plein écran
+    canvas_h = screen.height // 2
+    targets = []
+    for name in TARGETS:
+        u, v = target_position(name, cal.target_margin)
+        targets.append((name, u, v))
+    corner_targets = targets[1:]
+
+    selector = HandSelector(cfg.hand.preferred, cfg.hand.max_jump)
+    detector = StillnessDetector(cal.still_speed, cal.hold_ms)
+    abs_filter = cfg.filter.absolute
+    pointer_filter = PointFilter(abs_filter.min_cutoff, abs_filter.beta, abs_filter.d_cutoff)
+
+    step = "capture"  # capture -> validation, ou refus
+    current = 0
+    measures: dict[str, tuple[float, float]] = {}
+    zone = None
+    message = ""
+    warning = None
+    reached: set[str] = set()
+    previous_hand = None
+    saved = False
+    old_zone = cfg.pointer.zone
+
+    cv2.namedWindow(CALIBRATION_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.moveWindow(CALIBRATION_WINDOW, screen.x, screen.y)  # sur l'écran principal
+    cv2.setWindowProperty(CALIBRATION_WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    print(f"Ouverture de la caméra {camera_cfg.index}...")
+    camera = Camera(camera_cfg.index, camera_cfg.width, camera_cfg.height, backend=forced_backend)
+    with camera as cam, HandTracker(max_hands=2) as tracker:
+        warn_if_slow_camera(cam.info.fps)
+        for frame in cam.frames():
+            frame_height, frame_width = frame.bgr.shape[:2]
+            aspect = frame_width / frame_height
+
+            # Main pilote seulement (l'autre main est ignorée, comme dans AirDesk).
+            hands = tracker.detect(frame.rgb, frame.timestamp_ms, 2)
+            candidates = []
+            for hand in hands:
+                f = compute_features(hand.landmarks, cfg.fingers.folded_below,
+                                     cfg.fingers.folded_below_3d, aspect=aspect)
+                candidates.append(hand_candidate(hand, f, aspect))
+            pilot = selector.select(candidates, idle=True).pilot
+
+            camera_image = frame.bgr
+            point = None
+            speed = None
+            for i in range(len(hands)):
+                color = (80, 200, 80) if i == pilot else IGNORED_COLOR
+                draw_hand(camera_image, hands[i], color)
+            if pilot is not None:
+                hand = hands[pilot]
+                raw = hand.landmarks[cfg.pointer.landmark]
+                point = (raw[0], raw[1])
+                if previous_hand is not None:
+                    dt_s = (frame.timestamp_ms - previous_hand[0]) / 1000.0
+                    speed = wrist_speed(hand.landmarks, previous_hand[1], dt_s, aspect)
+                previous_hand = (frame.timestamp_ms, hand.landmarks)
+            else:
+                previous_hand = None
+
+            canvas = make_canvas(canvas_w, canvas_h)
+            if step == "capture":
+                progress, captured = detector.update(frame.timestamp_ms, speed, point)
+                if captured is not None:
+                    measures[targets[current][0]] = captured
+                    current += 1
+                    if current == len(targets):
+                        try:
+                            zone = zone_from_corners(measures, cal.target_margin, cal.min_size)
+                            offset = center_offset(zone, measures["centre"])
+                            warning = None
+                            if offset > cal.max_center_offset:
+                                warning = (f"Attention : le centre vise est decale de "
+                                           f"{offset * 100:.0f} % de la zone. Verifie, ou "
+                                           "recommence (R).")
+                            reached = set()
+                            pointer_filter.reset()
+                            step = "validation"
+                        except ValueError as exc:
+                            message = str(exc)
+                            step = "refus"
+                if step == "capture":
+                    draw_capture(canvas, targets, current, progress, point is not None,
+                                 camera_image, detector.waiting_for_movement)
+
+            if step == "validation":
+                cursor = None
+                if point is not None:
+                    fx, fy = pointer_filter(point[0], point[1], frame.timestamp_ms / 1000.0)
+                    cursor = zone_to_screen(fx, fy, zone)
+                    for name, u, v in corner_targets:
+                        near_x = abs(cursor[0] - u) < REACHED_DISTANCE
+                        near_y = abs(cursor[1] - v) < REACHED_DISTANCE
+                        if near_x and near_y:
+                            reached.add(name)
+                else:
+                    pointer_filter.reset()
+                draw_validation(canvas, corner_targets, reached, cursor, warning, camera_image)
+            elif step == "refus":
+                draw_refusal(canvas, message, camera_image)
+
+            cv2.imshow(CALIBRATION_WINDOW, canvas)
+            key = cv2.waitKey(1) & 0xFF
+            if key == KEY_ESCAPE:
+                break  # annuler : rien n'est modifié
+            if step == "capture" and key == KEY_BACKSPACE and current > 0:
+                current -= 1  # reprendre la cible précédente
+                measures.pop(targets[current][0], None)
+                detector.reset()
+            if step in ("validation", "refus") and key in (ord("r"), ord("R")):
+                step = "capture"  # recommencer depuis le centre
+                current = 0
+                measures = {}
+                detector.reset()
+            if step == "validation" and key == KEY_ENTER:
+                save_zone(LOCAL_CONFIG_PATH, zone)
+                saved = True
+                break
+
+    cv2.destroyAllWindows()
+    if not saved:
+        print("Étalonnage annulé : config/local.yaml n'est pas modifié.")
+        return
+    print(f"Zone avant : x {old_zone.left:.2f}..{old_zone.right:.2f}, "
+          f"y {old_zone.top:.2f}..{old_zone.bottom:.2f}")
+    print(f"Zone après : x {zone.left:.2f}..{zone.right:.2f}, y {zone.top:.2f}..{zone.bottom:.2f}"
+          f" ; centre décalé de {center_offset(zone, measures['centre']) * 100:.0f} %")
+    print(f"Enregistrée dans {LOCAL_CONFIG_PATH} (pointer.zone). Lancer `airdesk` pour l'utiliser.")

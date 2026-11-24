@@ -44,6 +44,8 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
 - **Absolu (par défaut)** : une **zone d'interaction** de l'image (par défaut 15 %..85 % en
   largeur, 20 %..80 % en hauteur) correspond à tout l'écran. Elle est dessinée en bleu clair
   dans la fenêtre de debug : y garder la main. Hors zone, le curseur reste collé au bord.
+  La zone dépend de la position de la caméra et de la posture : l'**étalonner** sur chaque
+  poste (voir « Étalonner la zone d'interaction » ci-dessous).
 - **Main baissée = veille** : on n'active, et on ne commence un pincement, que main dans la
   zone. Une main posée sous la zone pendant 0,5 s remet AirDesk en veille.
   Le curseur ne se désynchronise jamais de la main. Il reste figé pendant un pincement court,
@@ -104,12 +106,37 @@ airdesk --camera 1    # autre webcam
 airdesk --width 640 --height 480   # résolution demandée (défaut : 1280x720)
 airdesk --backend dshow            # forcer l'API vidéo : dshow, msmf, avfoundation, v4l2, any
 airdesk --dry-run --log            # enregistre les mesures dans data/logs/ (voir « Mesures »)
+airdesk --calibrate                # étalonnage guidé de la zone d'interaction (voir ci-dessous)
 ```
 
 `q` ou `Échap` dans la fenêtre de debug pour quitter.
 
 Au démarrage, AirDesk affiche la caméra réellement utilisée, par exemple
 `Caméra 1 : backend DSHOW, 640x480 YUY2, 29.4 images/s mesurées`, précédée des essais écartés.
+
+## Étalonner la zone d'interaction (`airdesk --calibrate`)
+
+La zone d'interaction (la partie de l'image qui correspond à l'écran) dépend de la position
+de la caméra et de la façon dont on se tient. On l'étalonne une fois par poste, à son rythme :
+
+1. Lancer `airdesk --calibrate`. Une fenêtre plein écran s'ouvre sur l'écran principal, avec
+   en bas à droite la vue de la caméra (on y voit sa main). Seule la **main pilote**
+   (`hand.preferred`) compte.
+2. Cinq cibles, une à la fois : **centre, haut-gauche, haut-droite, bas-droite, bas-gauche**
+   (à 3 % des bords de l'écran). Pour chacune : placer la main **là où l'on voudrait être
+   pour viser ce point**, dans une position confortable, et la **garder immobile**.
+3. Un anneau se remplit autour de la cible : au bout d'1 s d'immobilité, la position est
+   capturée (médiane de cette seconde). Si la main bouge, l'anneau repart de zéro. Pas de
+   limite de temps. Après une capture, bouger vers la cible suivante (« Mesure prise »).
+   `Retour arrière` = reprendre la cible précédente.
+4. La zone est calculée à partir des 4 coins (moyenne des deux mesures de chaque bord, puis
+   étirée de 3 % pour que chaque coin tombe sur sa cible). Elle est refusée si les coins sont
+   dans le désordre ou si elle fait moins de 0,15 de large ou de haut. Le centre sert de
+   contrôle : un avertissement s'affiche s'il est loin du milieu de la zone.
+5. **Validation** : un point suit la main avec la nouvelle zone (la vraie souris ne bouge
+   pas). Vérifier que les 4 coins s'atteignent confortablement (ils passent au vert).
+   `Entrée` = enregistrer dans `config/local.yaml`, `R` = recommencer, `Échap` = annuler
+   sans rien changer.
 
 ## Réglages propres à la machine (`config/local.yaml`)
 

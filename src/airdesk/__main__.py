@@ -38,12 +38,21 @@ def main() -> None:
         action="store_true",
         help="enregistre les mesures de chaque image dans data/logs/ (nombres seulement)",
     )
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="étalonnage guidé de la zone d'interaction (5 cibles en plein écran, à son "
+             "rythme), enregistré dans config/local.yaml",
+    )
     args = parser.parse_args()
 
     # Import tardif : `airdesk --help` reste instantané même si MediaPipe est long à charger.
-    from airdesk.app import run
+    from airdesk.app import calibrate, run
 
     try:
+        if args.calibrate:
+            calibrate(args.camera, args.config, args.backend, args.width, args.height)
+            return
         run(
             camera_index=args.camera,
             backend=args.backend,

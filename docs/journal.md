@@ -238,3 +238,31 @@ Analyses et décisions :
   min_palm_width reste à 0,22.
 - À faire : étalonnage de la zone par poste, session v3, puis décider de l'indice contre la main de
   profil ; vérifier en réel le gain de fluidité une fois actif.
+
+## 2026-11-24 — Étalonnage guidé de la zone d'interaction
+
+- Retour de P01 sur un premier étalonnage (5 s de mouvements libres, zone = percentiles 3-97
+  des positions) : **inutilisable en réel**. 5 s, c'est beaucoup trop court, et la zone
+  obtenue était incohérente (celle restée dans local.yaml : x 0,05..0,89, y 0,37..0,86). Un
+  nuage de mouvements libres ne dit pas où l'on veut viser. Retiré avant commit.
+- Nouveau protocole, **guidé et à son rythme** (`airdesk --calibrate`) :
+  - fenêtre plein écran sur l'écran principal, vue caméra en incrustation, main pilote seule ;
+  - 5 cibles dans l'ordre centre, haut-gauche, haut-droite, bas-droite, bas-gauche (à 3 % des
+    bords) ; consigne : « place ta main là où tu voudrais être pour viser ce point, dans une
+    position confortable, et garde-la immobile » ;
+  - capture automatique : poignet sous 0,5 taille de main/s pendant 1 s (anneau de
+    progression), position = médiane de cette seconde ; tout repart de zéro si la main bouge ;
+    pas de limite de temps ; Retour arrière = cible précédente ;
+  - **piège évité** : juste après une capture, la main est encore immobile, et la cible
+    suivante aurait été capturée au même endroit. Le détecteur exige donc un mouvement avant
+    la capture suivante (testé) ;
+  - zone = moyenne des deux mesures de chaque bord, **étirée de 3 %** (choix de P01) pour que
+    chaque coin mesuré tombe exactement sur sa cible et non sur le bord ; refus si coins dans
+    le désordre ou zone < 0,15 ; le centre sert de contrôle (avertissement au-delà de 15 %) ;
+  - validation : un point suit la main avec la nouvelle zone, sans toucher à la vraie souris ;
+    Entrée enregistre, R recommence, Échap annule.
+- Logique pure et testée dans interpretation/pointing.py (StillnessDetector,
+  zone_from_corners, center_offset) ; affichage dans ui/calibration_view.py ; seuils dans
+  gestures.yaml (section calibration).
+- Vérifié : 213 tests ; fenêtre plein écran ouverte et fermée sans erreur. **Le déroulé
+  complet reste à faire par P01.**

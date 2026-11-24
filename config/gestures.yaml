@@ -87,7 +87,8 @@ pointer:
   mode: absolute
   # Zone d'interaction, en fractions de l'image (0 = bord gauche / haut, 1 = droit / bas).
   # Hors zone, le curseur reste collé au bord de l'écran. Dessinée dans la fenêtre de debug.
-  # Défaut abaissé de 0,05 le 2026-11-24 (usage réel de P01 : point de
+  # Mieux : l'étalonner pour sa machine et sa posture (`airdesk --calibrate`, écrit dans
+  # config/local.yaml). Défaut abaissé de 0,05 le 2026-11-24 (usage réel de P01 : point de
   # pointage collé en bas 3 % du temps contre 0,15 % en haut, hauteur médiane 0,50).
   zone:
     left: 0.15
@@ -123,3 +124,19 @@ filter:
     min_cutoff: 1.0
     beta: 8.0
     d_cutoff: 1.0
+
+calibration:
+  # Étalonnage guidé de la zone (`airdesk --calibrate`) : 5 cibles en plein écran, capture
+  # automatique quand la main pilote reste immobile.
+  # Main immobile : poignet sous cette vitesse (tailles de main par seconde), même seuil que
+  # l'analyse du tremblement (scripts/analyse_log.py).
+  still_speed: 0.5
+  # Durée d'immobilité pour capturer une cible (la position retenue est la médiane).
+  hold_ms: 1000
+  # Taille minimale de la zone mesurée (fraction de l'image) ; en dessous, refus.
+  min_size: 0.15
+  # Les cibles d'angle sont à 3 % des bords de l'écran ; la zone est étirée d'autant pour
+  # que la main mesurée tombe exactement sur la cible.
+  target_margin: 0.03
+  # Centre mesuré trop loin du milieu de la zone calculée : avertissement (non bloquant).
+  max_center_offset: 0.15

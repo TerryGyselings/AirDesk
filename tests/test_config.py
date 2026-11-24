@@ -137,3 +137,10 @@ def test_save_keeps_the_other_sections(tmp_path):
     raw = read_yaml(path)
     assert raw["pinch"] == {"enter": 0.2}
     assert raw["camera"] == {"index": 1, "backend": "dshow", "width": 640, "height": 480}
+
+
+def test_calibration_settings_are_read_from_the_project_file():
+    cfg = load_config(local_path=None)
+    assert cfg.calibration.hold_ms == 1000
+    assert cfg.calibration.target_margin == 0.03
+    assert cfg.calibration.min_size == 0.15

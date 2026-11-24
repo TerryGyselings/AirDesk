@@ -141,6 +141,17 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class CalibrationConfig:
+    """Étalonnage guidé de la zone d'interaction (`airdesk --calibrate`)."""
+
+    still_speed: float = 0.5  # vitesse du poignet sous laquelle la main est immobile (taille/s)
+    hold_ms: float = 1000  # durée d'immobilité pour capturer une cible
+    min_size: float = 0.15  # largeur / hauteur minimale de la zone mesurée (fraction d'image)
+    target_margin: float = 0.03  # distance des cibles d'angle aux bords de l'écran
+    max_center_offset: float = 0.15  # au-delà : avertissement (centre mal placé)
+
+
+@dataclass(frozen=True)
 class Config:
     engagement: EngagementConfig
     pinch: PinchConfig
@@ -150,6 +161,7 @@ class Config:
     fingers: FingersConfig
     quality: QualityConfig
     hand: HandConfig
+    calibration: CalibrationConfig
 
 
 def read_yaml(path: Path) -> dict:
@@ -204,6 +216,7 @@ def load_config(path: Path | None = None, local_path: Path | None = LOCAL_CONFIG
         fingers=FingersConfig(**raw.get("fingers", {})),
         quality=QualityConfig(**raw.get("quality", {})),
         hand=HandConfig(**raw.get("hand", {})),
+        calibration=CalibrationConfig(**raw.get("calibration", {})),
     )
 
 
