@@ -52,6 +52,7 @@ BLOCK_PALM = "paume"  # paume de profil (require_palm_facing)
 BLOCK_INDEX = "index"  # index pas assez tendu (règles B, C)
 BLOCK_OTHER_FINGERS = "autres_doigts"  # majeur, annulaire et auriculaire repliés (poing)
 BLOCK_CLOSING = "fermeture"  # doigts qui ne se ferment pas assez vite (règles F, F3D)
+BLOCK_MOTION = "mouvement"  # poignet trop rapide au contact (max_contact_speed)
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,10 @@ class RuleThresholds:
     # Règles F / F3D : vitesse de fermeture minimale (baisse de la mesure par seconde).
     min_closing_speed: float = 0.0
     min_closing_speed_3d: float = 0.0
+    # Vitesse du poignet maximale au contact (tailles de main / s) ; 0 = pas de condition.
+    # Un vrai clic se fait main presque immobile ; un pincement pendant un geste rapide est
+    # souvent involontaire (log 19-12-46 : 72 140 et 72 421 ms).
+    max_contact_speed: float = 0.0
 
 
 def entry_block_reason(
@@ -79,14 +84,17 @@ def entry_block_reason(
     palm_width: float | None = None,
     closing_speed: float | None = None,
     closing_speed_3d: float | None = None,
+    wrist_speed: float | None = None,
 ) -> str | None:
     """Pourquoi la règle refuse d'entrer en pincement : None si elle accepte, sinon la PREMIÈRE
-    condition qui manque (BLOCK_RATIO, BLOCK_PALM, BLOCK_INDEX, BLOCK_OTHER_FINGERS,
-    BLOCK_CLOSING). Sert à la décision ET au log (comprendre un pincement refusé).
+    condition qui manque (BLOCK_RATIO, BLOCK_PALM, BLOCK_MOTION, BLOCK_INDEX,
+    BLOCK_OTHER_FINGERS, BLOCK_CLOSING). Sert à la décision ET au log (comprendre un
+    pincement refusé).
 
     `pinch_value` : la mesure choisie (pinch_ratio par défaut, voir MEASURES).
     `palm_width` inconnue (None) ne bloque pas ; une vitesse de fermeture inconnue bloque les
     règles F / F3D (pas assez d'historique pour savoir si les doigts se ferment).
+    `wrist_speed` inconnue (main qui vient d'apparaître) ne bloque pas.
     """
     if rule not in RULE_CONDITIONS:
         raise ValueError(f"Règle inconnue : '{rule}'. Choix possibles : {', '.join(RULES)}.")
@@ -98,6 +106,10 @@ def entry_block_reason(
     if thresholds.require_palm_facing and palm_width is not None:
         if palm_width < thresholds.min_palm_width:
             return BLOCK_PALM
+
+    if thresholds.max_contact_speed > 0 and wrist_speed is not None:
+        if wrist_speed >= thresholds.max_contact_speed:
+            return BLOCK_MOTION
 
     if use_3d:
         values = extensions_3d
@@ -133,10 +145,11 @@ def pinch_candidate(
     palm_width: float | None = None,
     closing_speed: float | None = None,
     closing_speed_3d: float | None = None,
+    wrist_speed: float | None = None,
 ) -> bool:
     """Vrai si la règle `rule` considère que la main entre en pincement."""
     reason = entry_block_reason(rule, pinch_value, extensions, extensions_3d, thresholds,
-                                palm_width, closing_speed, closing_speed_3d)
+                                palm_width, closing_speed, closing_speed_3d, wrist_speed)
     return reason is None
 
 
@@ -222,6 +235,21 @@ class PinchHysteresis:
       mesure oscille autour d'exit (0,3983, 0,4035, 0,3969, 0,4014...) ; sans marge, chaque
       passage juste sous exit annulait la confirmation, et un clic de 344 ms devenait un
       glisser. Avec 0 : comportement d'origine.
+    - Relâchement RAPIDE : au-dessus de `exit + release_fast_margin`, les doigts sont
+      franchement ouverts, le relâchement est immédiat (sans délai). Le délai et la marge
+      d'annulation ne servent qu'aux valeurs proches d'exit (oscillation). Constaté en usage
+      réel : entre deux tapes rapides (double-clic), les doigts ne restent ouverts que 1 ou 2
+      images ; avec le délai seul, les tapes fusionnaient en un seul appui (log 19-12-46,
+      65-67 s : 4 appuis pour 14 tapes ; 11 avec une marge de 0,05). 0 = désactivé.
+    - Relâchement RELATIF (`release_rise`) : relâchement immédiat quand la mesure remonte de
+      plus de `release_rise` au-dessus de son minimum depuis le contact (et au-dessus de
+      enter), même sans atteindre exit. Deux tapes rapides font deux creux séparés par une
+      petite remontée qui ne dépasse pas exit (log 2026-11-25_16-35-12 : 0,11 → 0,392 →
+      0,128 à 13 250 ms ; 0,162 → 0,338 → 0,105 à 58 375 ms). C'est l'idée de la
+      « proéminence » d'un détecteur de pics : on juge la remontée par rapport au creux, pas
+      à un seuil fixe. Seulement si l'appelant l'autorise (`allow_rise_release`) : la machine
+      ne le fait que pendant un appui sur place, car pendant un glisser les doigts bougent
+      autant (ruptures, voir docs/journal.md). 0 = désactivé.
 
     `update` renvoie "start", "end" ou None. `release_ms` : début du relâchement en cours
     (None sinon) ; après "end", c'est l'instant où le relâchement a commencé, la vraie fin du
@@ -238,6 +266,8 @@ class PinchHysteresis:
         release_grace_ms: float = 0,
         exit_on_fold: bool = False,
         release_cancel_margin: float = 0.0,
+        release_fast_margin: float = 0.0,
+        release_rise: float = 0.0,
     ):
         if rule not in RULE_CONDITIONS:
             raise ValueError(f"Règle inconnue : '{rule}'. Choix possibles : {', '.join(RULES)}.")
@@ -247,12 +277,15 @@ class PinchHysteresis:
         self.release_grace_ms = release_grace_ms
         self.exit_on_fold = exit_on_fold
         self.release_cancel_margin = release_cancel_margin
+        self.release_fast_margin = release_fast_margin
+        self.release_rise = release_rise
         self.reset()
 
     def reset(self) -> None:
         self.pinched = False
         self.release_ms: float | None = None  # début du relâchement en cours, sinon None
         self.last_block: str | None = None
+        self.min_value: float | None = None  # minimum de la mesure depuis le contact
 
     @property
     def releasing(self) -> bool:
@@ -267,19 +300,38 @@ class PinchHysteresis:
         palm_width: float | None = None,
         closing_speed: float | None = None,
         closing_speed_3d: float | None = None,
+        wrist_speed: float | None = None,
+        allow_rise_release: bool = False,
     ) -> str | None:
         if not self.pinched:
             self.last_block = entry_block_reason(
                 self.rule, pinch_value, extensions, extensions_3d, self.thresholds,
-                palm_width, closing_speed, closing_speed_3d,
+                palm_width, closing_speed, closing_speed_3d, wrist_speed,
             )
             if self.last_block is None:
                 self.pinched = True
                 self.release_ms = None
+                self.min_value = pinch_value
                 return "start"
             return None
 
         self.last_block = None
+        # Remontée nette au-dessus du creux (tape suivante d'un double-clic) : relâchement.
+        if self.min_value is None or pinch_value < self.min_value:
+            self.min_value = pinch_value
+        if (allow_rise_release and self.release_rise > 0
+                and pinch_value >= self.min_value + self.release_rise
+                and pinch_value >= self.thresholds.enter):
+            if self.release_ms is None:
+                self.release_ms = t_ms
+            self.pinched = False
+            return "end"
+        # Doigts franchement ouverts : relâchement immédiat, sans délai de confirmation.
+        if self.release_fast_margin > 0 and pinch_value > self.exit + self.release_fast_margin:
+            if self.release_ms is None:
+                self.release_ms = t_ms
+            self.pinched = False
+            return "end"
         releasing = pinch_value >= self.exit
         if self.exit_on_fold and fingers_folded_for_rule(
             self.rule, extensions, extensions_3d, self.thresholds

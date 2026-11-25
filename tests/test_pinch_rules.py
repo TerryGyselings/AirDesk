@@ -4,6 +4,7 @@ import pytest
 
 from airdesk.interpretation.pinch_rules import (
     BLOCK_CLOSING,
+    BLOCK_MOTION,
     BLOCK_OTHER_FINGERS,
     BLOCK_PALM,
     BLOCK_RATIO,
@@ -279,3 +280,99 @@ def test_a_real_re_pinch_still_cancels_the_release():
     assert run(h, [0.1, 0.1, 0.41, 0.20, 0.20]) == [("start", 0)]
     assert h.pinched
     assert not h.releasing
+
+
+# --- Relâchement rapide (double-clic) ----------------------------------------------------------
+
+
+def test_fast_release_when_the_fingers_open_wide():
+    """Au-dessus de exit + 0,05 : relâchement immédiat, sans attendre le délai de 66 ms."""
+    h = PinchHysteresis("A", T, exit=0.40, release_grace_ms=66, release_cancel_margin=0.05,
+                        release_fast_margin=0.05)
+    assert run(h, [0.1, 0.1, 0.55, 0.1]) == [("start", 0), ("end", 66), ("start", 99)]
+
+
+def test_values_close_to_exit_still_wait_for_the_grace():
+    """Entre 0,40 et 0,45 (oscillation d'un relâchement lent) : le délai s'applique."""
+    h = PinchHysteresis("A", T, exit=0.40, release_grace_ms=66, release_cancel_margin=0.05,
+                        release_fast_margin=0.05)
+    assert run(h, [0.1, 0.1, 0.42, 0.39, 0.43, 0.44]) == [("start", 0), ("end", 132)]
+    assert h.release_ms == 66
+
+
+def test_without_fast_margin_a_short_opening_does_not_release():
+    """Comportement d'origine : 1 image ouverte (< 66 ms) puis repincement = même pincement."""
+    h = PinchHysteresis("A", T, exit=0.40, release_grace_ms=66, release_cancel_margin=0.05)
+    assert run(h, [0.1, 0.1, 0.55, 0.1]) == [("start", 0)]
+
+
+# --- Vitesse du poignet au contact ---------------------------------------------------------------
+
+LENT = RuleThresholds(enter=0.25, folded_below=0.8, max_contact_speed=1.8)
+
+
+def test_fast_wrist_blocks_the_entry():
+    assert entry_block_reason("D", 0.1, TENDUS, TENDUS, LENT, wrist_speed=3.06) == BLOCK_MOTION
+    assert entry_block_reason("D", 0.1, TENDUS, TENDUS, LENT, wrist_speed=0.34) is None
+
+
+def test_unknown_speed_or_no_threshold_does_not_block():
+    assert entry_block_reason("D", 0.1, TENDUS, TENDUS, LENT, wrist_speed=None) is None
+    assert entry_block_reason("D", 0.1, TENDUS, TENDUS, T, wrist_speed=5.0) is None
+
+
+def test_hysteresis_reports_motion():
+    h = PinchHysteresis("D", LENT, exit=0.40)
+    assert h.update(0, 0.1, TENDUS, TENDUS, wrist_speed=3.0) is None
+    assert h.last_block == BLOCK_MOTION
+    assert h.update(33, 0.1, TENDUS, TENDUS, wrist_speed=0.5) == "start"
+
+
+# --- Relâchement relatif (release_rise) ----------------------------------------------------------
+
+
+def run_rise(hysteresis, ratios, allow=True):
+    events = []
+    for i in range(len(ratios)):
+        event = hysteresis.update(i * 33, ratios[i], TENDUS, TENDUS, allow_rise_release=allow)
+        if event is not None:
+            events.append((event, i * 33))
+    return events
+
+
+# Courbe réelle du log 2026-11-25_16-35-12 à 13 250 ms : deux creux, remontée à 0,392 < exit.
+TWO_DIPS = [0.6047, 0.4274, 0.1765, 0.1187, 0.1140, 0.1096, 0.1477, 0.2446, 0.3922, 0.3621,
+            0.1613, 0.1275, 0.1291, 0.1286, 0.1719]
+
+
+def test_release_rise_separates_two_dips():
+    h = PinchHysteresis("A", T, exit=0.40, release_grace_ms=66, release_rise=0.15)
+    events = run_rise(h, TWO_DIPS)
+    # Contact à 0,1765 ; remontée de 0,1096 à 0,2446 (+0,135) : pas encore ; 0,3922 : relâché ;
+    # 0,1613 : 2e contact.
+    assert events == [("start", 66), ("end", 264), ("start", 330)]
+
+
+def test_release_rise_disabled_with_zero():
+    h = PinchHysteresis("A", T, exit=0.40, release_grace_ms=66)
+    assert run_rise(h, TWO_DIPS) == [("start", 66)]
+
+
+def test_release_rise_only_when_allowed():
+    """La machine ne l'autorise que pendant un appui sur place (jamais pendant un glisser)."""
+    h = PinchHysteresis("A", T, exit=0.40, release_grace_ms=66, release_rise=0.15)
+    assert run_rise(h, TWO_DIPS, allow=False) == [("start", 66)]
+
+
+def test_release_rise_needs_the_value_above_enter():
+    """0,05 -> 0,22 remonte de 0,17 mais reste sous enter (0,25) : les doigts sont encore
+    collés, pas de relâchement."""
+    h = PinchHysteresis("A", T, exit=0.40, release_rise=0.15)
+    assert run_rise(h, [0.10, 0.05, 0.22, 0.05]) == [("start", 0)]
+
+
+def test_re_pinch_after_a_rise_release_needs_enter():
+    """Après le relâchement relatif, il faut repasser sous enter pour un nouveau contact."""
+    h = PinchHysteresis("A", T, exit=0.40, release_rise=0.15)
+    assert run_rise(h, [0.10, 0.30, 0.27, 0.26, 0.20]) == [("start", 0), ("end", 33),
+                                                          ("start", 132)]

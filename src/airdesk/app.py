@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from contextlib import nullcontext
 from dataclasses import replace
@@ -15,6 +16,7 @@ from pathlib import Path
 import cv2
 
 from airdesk.actuator import create_actuator, detect_screen
+from airdesk.actuator.system import resolve_double_click_ms
 from airdesk.capture import Camera
 from airdesk.config import apply_cli_overrides, load_config
 from airdesk.interpretation import GestureStateMachine, State, compute_features
@@ -25,6 +27,7 @@ from airdesk.interpretation.hand_selection import (
     TrackerModePolicy,
 )
 from airdesk.interpretation.pointing import zone_to_screen
+from airdesk.interpretation.state_machine import PressAt, ReleaseAt
 from airdesk.perception import HandTracker, PointFilter
 from airdesk.session_log import SessionLog, build_metadata
 from airdesk.ui import draw_debug
@@ -39,6 +42,19 @@ def warn_if_slow_camera(fps: float) -> None:
         print(f"  ATTENTION : la caméra ne donne que {fps:.1f} images/s (< {SLOW_CAMERA_FPS}). "
               "Peu de lumière ? Éclairer la pièce : la webcam allonge son temps de pose quand "
               "il fait sombre, et le curseur devient moins fluide.")
+
+
+def pin_offset_px(events, cursor, actuator) -> float | None:
+    """Écart en pixels entre la main (position réelle, `cursor`) et le point épinglé d'un
+    PressAt / ReleaseAt de l'image : ce que l'épinglage « corrige ». None sans événement
+    épinglé."""
+    if cursor is None:
+        return None
+    for event in events:
+        if isinstance(event, (PressAt, ReleaseAt)):
+            x, y = actuator.to_pixels(event.u, event.v)
+            return math.hypot(cursor[0] - x, cursor[1] - y)
+    return None
 
 
 def hand_candidate(hand, features, aspect: float) -> HandCandidate:
@@ -74,6 +90,13 @@ def run(
     else:
         print("Pointage relatif (comme un pavé tactile).")
     actuator = create_actuator(dry_run, cfg.pointer.pixels_per_frame_width, screen)
+    # Délai du double-clic : "auto" = délai du système (lu ici, la machine à états reste
+    # sans dépendance système). Enregistré tel quel dans le log.
+    double_click_ms = resolve_double_click_ms(cfg.pinch.double_click_ms)
+    cfg = replace(cfg, pinch=replace(cfg.pinch, double_click_ms=double_click_ms))
+    if cfg.pinch.click_mode == "press" and absolute:
+        print(f"Double-clic aimanté : {double_click_ms:g} ms, "
+              f"{cfg.pinch.double_click_snap:g} taille de main")
     machine = GestureStateMachine(cfg.engagement, cfg.pinch, cfg.fingers, cfg.pointer)
     selector = HandSelector(cfg.hand.preferred, cfg.hand.max_jump)
     filter_cfg = cfg.filter.for_mode(cfg.pointer.mode)
@@ -163,7 +186,7 @@ def run(
                     previous_hand = None
 
                 # 2) Interprétation puis action.
-                events = machine.update(frame.timestamp_ms, features, pointer)
+                events = machine.update(frame.timestamp_ms, features, pointer, speed)
                 for event in events:
                     actuator.apply(event)
 
@@ -182,6 +205,7 @@ def run(
                         if absolute:
                             u, v = zone_to_screen(pointer[0], pointer[1], cfg.pointer.zone)
                             cursor = actuator.to_pixels(u, v)
+                    pin_offset = pin_offset_px(events, cursor, actuator)
                     logger.write_frame(
                         frame.timestamp_ms, features, machine.state.value, events,
                         processing_ms, wrist=wrist, wrist_speed=speed, cursor=cursor,
@@ -191,6 +215,8 @@ def run(
                         tracker_hands=tracker_hands,
                         contact_ms=machine.event_contact_ms,
                         anchor_distance=machine.anchor_distance,
+                        pin_kind=machine.pin_kind,
+                        pin_offset_px=pin_offset,
                     )
 
                 if show_preview:

@@ -27,16 +27,19 @@ from airdesk.log_analysis import (
     SLOW_FRAME_MS,
     block_reason,
     click_mode,
+    contact_speeds,
     estimated_latencies,
     frame_interval_ms,
     latencies,
     mean_and_p95,
+    pin_offsets,
     pinch_durations,
     pinch_thresholds,
     press_episodes,
     read_log,
     read_metadata,
     release_grace,
+    rise_splits,
     still_periods,
     summarize,
     text_histogram,
@@ -60,6 +63,14 @@ def main() -> None:
     parser.add_argument("--immobile-speed", type=float, default=IMMOBILE_SPEED,
                         help="vitesse du poignet sous laquelle la main est jugée immobile "
                              f"(tailles de main / s, défaut {IMMOBILE_SPEED})")
+    parser.add_argument("--rise-guard-px", type=float, default=RISE_GUARD_PX,
+                        help="rejeu de release_rise : distance au point de contact (px) "
+                             "au-delà de laquelle il n'agit plus (≈ drag_threshold, défaut "
+                             f"{RISE_GUARD_PX:g})")
+    parser.add_argument("--contact-speed", type=float, default=CONTACT_SPEED,
+                        help="vitesse du poignet au contact au-delà de laquelle un pincement "
+                             "est listé (candidat max_contact_speed, défaut "
+                             f"{CONTACT_SPEED})")
     args = parser.parse_args()
 
     csv_path = args.csv
@@ -156,6 +167,9 @@ def main() -> None:
     print_latency(rows, mode, pinches)
     if mode == "press":
         print_press_episodes(rows)
+    print_contact_speeds(rows, args.contact_speed)
+    print_pin_offsets(rows)
+    print_rise_replay(rows, enter, args.rise_guard_px)
 
     print("\nDurée des pincements :")
     for line in text_histogram(durations, marker=click_max_ms, marker_label="click_max_ms"):
@@ -167,6 +181,81 @@ def main() -> None:
     )
 
     print_jitter(rows, args.immobile_speed)
+
+
+# Rejeu de release_rise : valeurs comparées, et garde en pixels (0,15 taille de main ≈ 95 px
+# dans les logs du 2026-11-24 et 25 : 570 à 700 px par taille de main).
+RISE_VALUES = (0.12, 0.15, 0.18)
+RISE_GUARD_PX = 95.0
+
+
+def print_pin_offsets(rows) -> None:
+    """Clics épinglés : écart en pixels entre la main et le point où l'événement est émis.
+    press : dérive pendant la confirmation du Press ; release : dérive pendant l'appui
+    (ce que l'épinglage corrige) ; *_snap : distance au 1er clic d'un double-clic aimanté."""
+    found = pin_offsets(rows)
+    if not found:
+        return
+    print("Clics épinglés, écart main -> point épinglé (px) :")
+    for kind in ("press", "release", "press_snap", "release_snap"):
+        values = found.get(kind)
+        if not values:
+            continue
+        mean, p95 = mean_and_p95(values)
+        print(f"  {kind:<12} {len(values):>3} : médiane {statistics.median(values):5.1f}, "
+              f"P95 {p95:5.1f}, max {max(values):5.1f}")
+    snaps = len(found.get("press_snap", []))
+    print(f"  -> {snaps} clic(s) aimanté(s) sur le clic précédent (double-clic).")
+
+
+def print_rise_replay(rows, enter: float, guard_px: float) -> None:
+    """Ce que ferait release_rise sur ce log : appuis coupés en deux. Dans un glisser, c'est
+    une rupture (à éviter) ; dans un clic, c'est une tape fusionnée qui serait séparée."""
+    print(f"Rejeu de release_rise (garde {guard_px:g} px, simulation sur pinch_ratio) :")
+    for rise in RISE_VALUES:
+        splits = rise_splits(rows, rise, enter, guard_px)
+        ruptures = []
+        separated = []
+        for split in splits:
+            if split.in_drag:
+                ruptures.append(str(split.release_ms))
+            else:
+                separated.append(str(split.release_ms))
+        line = (f"  {rise:.2f} : {len(ruptures)} rupture(s) de glisser, "
+                f"{len(separated)} appui(s) de clic coupé(s)")
+        if ruptures:
+            line += " | ruptures à " + ", ".join(ruptures) + " ms"
+        if separated:
+            line += " | coupés à " + ", ".join(separated) + " ms"
+        print(line)
+
+
+# Seuil candidat de max_contact_speed (logs du 2026-11-24, voir docs/journal.md).
+CONTACT_SPEED = 1.8
+
+
+def print_contact_speeds(rows, threshold: float) -> None:
+    """Vitesse du poignet au contact des pincements suivis d'un clic ou d'un glisser : un
+    vrai clic se fait main presque immobile (condition facultative max_contact_speed)."""
+    found = contact_speeds(rows)
+    if not found:
+        return
+    speeds = []
+    for c in found:
+        speeds.append(c.speed)
+    mean, p95 = mean_and_p95(speeds)
+    print(f"Vitesse du poignet au contact ({len(speeds)} pincements suivis d'un clic ou d'un "
+          f"glisser) : médiane {statistics.median(speeds):.2f}, P95 {p95:.2f}, "
+          f"max {max(speeds):.2f} taille de main/s")
+    fast = []
+    for c in found:
+        if c.speed >= threshold:
+            fast.append(f"{c.contact_ms} ms ({c.outcome}, {c.speed:.2f})")
+    if fast:
+        print(f"  Au-dessus de {threshold:g} (refusés par max_contact_speed = {threshold:g}) : "
+              + " ; ".join(fast))
+    else:
+        print(f"  Aucun au-dessus de {threshold:g}.")
 
 
 def print_latency(rows, mode: str, pinches) -> None:

@@ -83,6 +83,8 @@ class Sample:
     # pinch_ratio_3d, recalculée sur la série de chaque prise (voir add_closing_speeds).
     closing_speed: float | None = None
     closing_speed_3d: float | None = None
+    # Vitesse du poignet (tailles de main / s), protocole v2 et suivants.
+    wrist_speed: float | None = None
 
     @property
     def hand_present(self) -> bool:
@@ -165,6 +167,8 @@ def read_dataset(path: Path) -> list[Sample]:
                     palm_facing=facing,
                     wrist_y=float(record["wrist_y"]) if record.get("wrist_y") else None,
                     pinch_ratio_3d=ratio_3d,
+                    wrist_speed=float(record["wrist_speed"]) if record.get("wrist_speed")
+                    else None,
                 )
             )
     add_closing_speeds(samples)
@@ -410,6 +414,7 @@ class EpisodeSettings:
     measure: str = "ratio"
     exit_on_fold: bool = False
     release_cancel_margin: float = 0.0
+    release_fast_margin: float = 0.0
 
     def describe(self) -> str:
         fold = ", sortie si repli" if self.exit_on_fold else ""
@@ -430,7 +435,7 @@ def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list
     """
     hysteresis = PinchHysteresis(
         settings.rule, settings.thresholds, settings.exit, settings.release_grace_ms,
-        settings.exit_on_fold, settings.release_cancel_margin,
+        settings.exit_on_fold, settings.release_cancel_margin, settings.release_fast_margin,
     )
     guard = HandSizeGuard(settings.guard_ratio, settings.window_ms)
     episodes: list[Episode] = []
@@ -454,7 +459,7 @@ def simulate_sequence(sequence: list[Sample], settings: EpisodeSettings) -> list
         last_seen_ms = t
         value = measure_value(s, settings.measure)
         event = hysteresis.update(t, value, s.extensions, s.extensions_3d, s.palm_width,
-                                  s.closing_speed, s.closing_speed_3d)
+                                  s.closing_speed, s.closing_speed_3d, s.wrist_speed)
         if event == "start":
             start_ms = t
         elif event == "end":
@@ -908,7 +913,7 @@ def thresholds_from_proposals(
 # vrai pincement FERME activement les doigts (closing_speed), un pivot non.
 
 ENTRY_DESCRIPTORS = ["pinch_ratio", "pinch_ratio_3d", "closing_speed", "closing_speed_3d",
-                     "palm_width"]
+                     "palm_width", "wrist_speed"]
 
 
 def entry_value(name: str, s: Sample) -> float | None:
@@ -922,6 +927,8 @@ def entry_value(name: str, s: Sample) -> float | None:
         return s.closing_speed_3d
     if name == "palm_width":
         return s.palm_width
+    if name == "wrist_speed":
+        return s.wrist_speed
     raise ValueError(f"Descripteur inconnu : {name}")
 
 

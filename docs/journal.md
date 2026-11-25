@@ -345,3 +345,116 @@ est ressenti à chaque clic.**
 - Correction de l'analyse : le nombre de glisser comptait chaque Press ; il compte désormais
   les passages à l'état « glisser », pour que les clics du mode press (Press + Release) ne
   soient pas comptés comme des glisser.
+
+## 2026-11-24 — Double-clic, pincements en mouvement, tremblement
+
+Retour d'usage du mode press (log 19-12-46) : latence 42 ms (P95 62) au lieu de ~363 ms,
+9,3 ms par image, 2 % d'images en mode 2 mains. Restaient le double-clic et 2 pincements en
+trop.
+
+- **Double-clic, cause 1** : entre deux tapes rapides, les doigts ne restent ouverts que 1 à
+  2 images ; le délai de relâchement (66 ms) et la marge d'annulation fusionnaient les tapes.
+  Rejoué dans la machine (64,9-67,8 s, 14 tapes) : 5 Press / 4 Release avant ; **11 / 11 avec
+  `release_fast_margin: 0.05`** (relâchement immédiat au-dessus de 0,45) ; 8 / 7 avec 0,15.
+  Choix de 0,05 plutôt que 0,15 : pics pendant un glisser qui continue (24 glisser, 4 logs) :
+  3 au-dessus de 0,40, aucun au-dessus de 0,45. Les 2 tapes restantes ne dépassent jamais
+  0,40. Le clic réel de 79 296 ms reste un clic (testé).
+- **Double-clic, cause 2** : le curseur bougeait de 1 à 4 px entre deux clics (Windows :
+  ±2 px). Verrou `double_click_lock_ms: auto` (GetDoubleClickTime, 500 ms ici) : après un
+  clic, curseur figé tant que la main reste à moins de drag_threshold ; rejoué : les 11
+  Press au même pixel. Fin du verrou : rattrapage progressif.
+- **Pincements en mouvement** (72 140 et 72 421 ms, devenus des glisser) : vitesse du
+  poignet au contact 3,06 et 1,87 taille de main/s, contre une médiane de 0,34 (P95 1,65) sur
+  80 pincements suivis d'un clic ou d'un glisser. Seuil 1,8 : les 2 refusés, 3 des 80 aussi
+  (3,13 / 3,63 / 4,82, peut-être involontaires). Marge mince : `max_contact_speed` laissé à
+  0 (désactivé) ; règle candidate G (D + vitesse) ajoutée à l'analyse v4.
+- Saut du curseur au début des glisser (sans rattrapage) : médiane 95 px, max 153.
+- **Tremblement : médiane 3,01 px sur 1 s** (1,43 px au log 18-19-43), au-dessus de
+  l'objectif de 2 px. À revoir plus tard : filtre ou éclairage (caméra à 24 i/s le soir).
+
+## 2026-11-25 — Curseur en temps réel, clics épinglés, tapes fusionnées
+
+Essai réel du double-clic (log 16-35-12, 30 i/s, latence 34 ms) : deux défauts.
+
+**1. Curseur figé gênant.** Le verrou du double-clic (500 ms après chaque clic) est supprimé.
+- **Clics épinglés** : la machine émet `PressAt(u, v)` / `ReleaseAt(u, v)` (pointage
+  absolu, mode press). Press au point du contact, Release au même point pour un clic sur
+  place ; au-delà de `drag_threshold`, glisser et Release simple à la position réelle.
+- **Le curseur reste figé bouton enfoncé sur place** (décision après mesure) : la main dérive
+  pendant les clics de 4 à 11 px en médiane (logs 19-12, 19-28, 16-35), jusqu'à 118 px, et
+  **57 clics sur 82 dépassent 4 px**, le seuil de glisser de Windows (SM_CXDRAG). Un curseur
+  en temps réel bouton enfoncé ferait partir des débuts de sélection ou de glisser-déposer.
+  Avant le Press (1 image) et après le Release, le curseur suit la main (rattrapage
+  `drag_catchup_ms`).
+- **Écart avec la demande** : l'aller-retour « point épinglé → position réelle » juste après le
+  Press n'est pas fait. Bouton enfoncé, ce retour serait lui-même un glisser (jusqu'à ~50 px
+  pour un clic aimanté). L'actionneur place le curseur au point épinglé puis appuie ; c'est
+  la machine qui le ramène vers la main après le Release.
+- **Double-clic aimanté** : un 2e Press à moins de `double_click_ms` (auto = GetDoubleClickTime,
+  500 ms) du Press précédent et à moins de `double_click_snap` tailles de main de son contact
+  est émis au pixel exact du 1er clic (Windows exige ±2 px). Écart entre deux contacts
+  rapprochés (< 500 ms, 3 logs en mode press) : 1 à 21 px ; 570 à 700 px par taille de main
+  (rapport cursor / anchor_distance), donc 0,03 à 0,037. **Choix : 0,08** (45 à 56 px,
+  marge d'environ x2). Rejoué sur les 14 tapes du log 19-12-46 : les 11 Press et 11 Release
+  au même point.
+- Mesure : colonnes `pin_kind` et `pin_offset_px` (écart main → point épinglé), répartition
+  dans analyse_log.py.
+
+**2. Doubles-clics rapides non reconnus : tapes fusionnées.** Courbes pinch_ratio :
+- 13 250 ms (« clic » de 796 ms) : creux 0,11 → remontée à **0,392** → creux 0,128, puis
+  plateau 0,399-0,401 pendant ~200 ms qui retarde aussi le Release ;
+- 58 375 ms (« clic » de 406 ms) : creux 0,162 → **0,338** → creux 0,105 ;
+- 15 171-15 546 ms : **pas de fusion** (Press 15 218, Release 15 406, Press 15 577, Release
+  15 875 ; 359 ms entre les Press, curseur verrouillé), séquence identique au double-clic
+  réussi de 52 577. **Non expliqué par le log** (cible qui change au 1er clic ?).
+
+Dans les deux premiers cas, la remontée entre les tapes ne dépasse pas exit (0,40) : un seul
+appui. **Relâchement relatif** (`release_rise`, pinch_rules.py) : relâchement quand la mesure
+remonte de `release_rise` au-dessus de son minimum depuis le contact (et au-dessus de enter).
+C'est l'idée de la proéminence d'un détecteur de pics. Rejeu sur pinch_ratio (`rise_splits`, log_analysis.py),
+62 glisser dans 9 logs ; une ligne = un appui coupé en deux :
+
+| release_rise | garde | ruptures de glisser | appuis de clic coupés | 13 250 / 58 375 séparés |
+|---|---|---|---|---|
+| 0,15 | aucune | 20 (dont 8 dans les logs du mode press) | 26 | oui / oui |
+| 0,12 | main < 95 px du contact | 9 | 26 | oui / oui |
+| **0,15** | main < 95 px du contact | **7** (17-22-29 : 4, 17-33-21 : 3) | 26 | oui / oui |
+| 0,18 | main < 95 px du contact | 7 | 22 | oui / **non** |
+
+- **Garde** : la machine ne l'autorise que pendant un appui sur place (état PINCHING), jamais
+  pendant un glisser.
+- Les 7 ruptures restantes sont toutes dans des logs du mode release, 170-234 ms après le
+  contact (creux 0,07-0,15, pics 0,27-0,35). Les vraies tapes se font 79-313 ms après le
+  contact, avec des pics de 0,27 à 0,55 : ni le temps ni l'amplitude ne les distinguent.
+  Aucune rupture dans les 3 logs du mode press.
+- Risque : en mode press, une rupture au début d'un glisser donne clic + glisser, soit sous
+  Windows un « double-clic glissé » (sélection par mots).
+- Rejoué dans la machine (règle D) sur les deux épisodes réels : 2 Press / 2 Release chacun
+  avec 0,15, 1 seul sans.
+- **Décision : livré désactivé (`release_rise: 0.0`), proposition 0,15.** analyse_log.py
+  affiche le rejeu de chaque log pour 0,12 / 0,15 / 0,18 ; à activer après un essai.
+
+**Commit séparé** : le mode press et TrackerModePolicy (état du log 19-12-46 : 42 ms, ~9 ms
+par image) ont été commités à part (f72f52c), testés dans une copie de travail temporaire ;
+le travail sur le double-clic reste dans un second commit.
+
+## 2026-11-25 — Essai réel : release_rise activé à 0,15
+
+Essai réel avec `release_rise: 0.15` (log 17-10-10, 1603 images en 53,4 s, 30 i/s) :
+**concluant**. Les doubles-clics rapides passent, les clics rapides sont séparés, aucun glisser
+n'est coupé, et il n'y a plus d'à-coup du curseur après un clic.
+
+- Latence contact → Press : moyenne 34 ms, P95 47 ms (30 appuis).
+- **4 doubles-clics aimantés** : écart main → point du 1er clic, médiane 2,9 px au Press
+  (max 8,1), 7,1 px au Release (max 12,2).
+- Autres clics épinglés : press 26 (médiane 1,7 px, max 18), release 24 (médiane 8,3 px,
+  P95 38, max 42 px) ; c'est la dérive pendant l'appui que l'épinglage annule.
+- Rejeu de release_rise 0,15 sur ce log : 0 rupture de glisser.
+- Déplacement de la main pendant les clics : max 0,10 taille de main, sous drag_threshold
+  (0,15).
+- **Décision : `release_rise: 0.15` activé.**
+- **À surveiller** : 4 pincements refusés pour « autres_doigts » (règle D : majeur, annulaire
+  et auriculaire repliés), dont 3 en début de session (11 860, 13 735, 15 469 ms, 375 à
+  562 ms chacun) et un à 58 203 ms (360 ms). Hypothèse : le geste « OK » (autres doigts
+  ouverts) n'est pas toujours respecté, surtout en début de session. Si ça persiste,
+  comparer les extensions des doigts de ces pincements avec `folded_below` (0,87).

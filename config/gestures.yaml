@@ -30,13 +30,25 @@ pinch:
   # Mode press : images de pincement d'affilée avant le Press (anti-glitch du suivi).
   min_press_frames: 2
   # Mode press : distance (tailles de main) entre le point de contact et la main au-delà de
-  # laquelle le curseur se remet à suivre (glisser). Déplacement du poignet pendant 24 vrais
-  # clics de P01 (3 logs) : 20 sous 0,12, traîne 0,23 / 0,34 / 0,36 / 0,50. À ajuster avec
+  # laquelle l'appui devient un glisser. Le curseur suit la main en permanence, sauf bouton
+  # enfoncé sur place (il reste au point du clic, pour qu'aucun mini-glisser ne parte).
+  # Déplacement du poignet pendant 24 vrais clics de P01 (3 logs) : 20 sous 0,12, traîne
+  # 0,23 / 0,34 / 0,36 / 0,50. À ajuster avec
   # scripts/analyse_log.py (déplacement pendant les clics, saut au début des glisser).
   drag_threshold: 0.15
-  # Mode press : au début d'un glisser, le curseur rejoint la main en ce temps (ms) au lieu
-  # de sauter du point figé à la main (pointage absolu). 0 = saut direct.
+  # Mode press : à la fin du gel (début d'un glisser, fin d'un clic), le curseur rejoint la
+  # main en ce temps (ms) au lieu de sauter du point figé à la main (pointage absolu).
+  # 0 = saut direct.
   drag_catchup_ms: 100
+  # Mode press, pointage absolu : double-clic aimanté. Un 2e Press à moins de
+  # double_click_ms du Press précédent ET à moins de double_click_snap tailles de main de son
+  # point de contact est émis au pixel exact du 1er clic (Windows exige ±2 px). auto = délai
+  # de double-clic du système (Windows : GetDoubleClickTime, 500 ms par défaut).
+  # double_click_snap : entre deux tapes, la main se déplace de 1 à 21 px (3 logs en mode
+  # press, 2026-11-24 et 25), soit 0,03 à 0,037 taille de main (570 à 700 px par taille de
+  # main). 0,08 (45 à 56 px) laisse une marge d'environ x2. 0 = pas d'aimant.
+  double_click_ms: auto
+  double_click_snap: 0.08
   # Mode release : un pincement plus court que ça = clic. Plus long = saisie (glisser).
   click_max_ms: 400
   # Règle anti-poing (poing fermé = pouce sur l'index replié = faux pincement).
@@ -58,6 +70,29 @@ pinch:
   # était annulé à chaque passage juste sous 0,40, et un clic de 344 ms devenait un glisser
   # (log 18-19-43, 79 296 ms).
   release_cancel_margin: 0.05
+  # Relâchement IMMÉDIAT (sans délai) au-dessus de exit + cette marge : doigts franchement
+  # ouverts. Le délai et la marge d'annulation ne servent qu'aux valeurs proches d'exit.
+  # Log 19-12-46 (65-67 s, double-clics) : entre deux tapes, les doigts ne restent ouverts
+  # que 1 ou 2 images ; avec le délai seul, 4 appuis pour 14 tapes. Marge 0,05 : 11 appuis ;
+  # 0,15 : 7. Pics pendant un glisser qui continue (24 glisser, 4 logs) : 3 au-dessus de
+  # 0,40, aucun au-dessus de 0,45. 0 = désactivé.
+  release_fast_margin: 0.05
+  # Condition d'entrée : vitesse du poignet au contact < max_contact_speed (tailles de main
+  # par seconde), raison de refus « mouvement ». 0 = désactivé. Proposition 1,8 (logs du
+  # 2026-11-24) : 80 pincements suivis d'un clic ou d'un glisser, médiane 0,34, P95 1,65 ;
+  # 3 refusés (3,13 / 3,63 / 4,82, peut-être involontaires) ; les 2 pincements en trop
+  # (3,06 et 1,87, log 19-12-46 à 72 s) refusés. Marge mince : NON activée, à revoir.
+  max_contact_speed: 0.0
+  # Relâchement RELATIF (mode press, appui sur place seulement) : relâchement quand la mesure
+  # remonte de plus de release_rise au-dessus de son minimum depuis le contact (et au-dessus
+  # de enter), sans attendre exit. Sépare deux tapes rapides fusionnées (log 16-35-12 :
+  # 0,11 -> 0,392 -> 0,128 à 13 250 ms ; 0,162 -> 0,338 -> 0,105 à 58 375 ms). Simulation
+  # sur 62 glisser (9 logs) avec 0,15 : 7 ruptures, toutes dans des logs du mode release,
+  # 0 dans les 3 logs du mode press ; 0,18 ne sépare plus l'épisode de 58 375.
+  # VALIDÉ EN RÉEL le 25/11 (log 17-10-10) : 4 doubles-clics aimantés, aucun glisser coupé,
+  # clics rapides séparés, latence 34 ms. scripts/analyse_log.py affiche le rejeu de chaque
+  # log. 0 = désactivé.
+  release_rise: 0.15
   # Règles candidates F / F3D (vitesse de fermeture des doigts) : pas encore branchées,
   # à régler avec la session v4 (scripts/analyse_gestures.py).
   min_closing_speed: 0.0

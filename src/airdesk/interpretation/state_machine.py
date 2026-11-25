@@ -72,7 +72,24 @@ class Release:
     pass
 
 
-Event = Move | MoveTo | Click | Press | Release
+@dataclass(frozen=True)
+class PressAt:
+    """Bouton enfoncé en un point « épinglé » (fractions de l'écran) : le point du contact,
+    ou celui du 1er clic d'un double-clic. L'actionneur y place le curseur avant d'appuyer."""
+
+    u: float
+    v: float
+
+
+@dataclass(frozen=True)
+class ReleaseAt:
+    """Bouton relâché au point épinglé : le système voit un clic sur place."""
+
+    u: float
+    v: float
+
+
+Event = Move | MoveTo | Click | Press | Release | PressAt | ReleaseAt
 
 
 class GestureStateMachine:
@@ -86,8 +103,12 @@ class GestureStateMachine:
 
     Pointage : `pointer.mode` "absolute" émet MoveTo (zone de l'image -> écran entier),
     "relative" émet Move (déplacements). Sans `pointer`, pointage relatif (comportement
-    d'origine). Dans les deux cas, le curseur reste figé pendant un pincement court, pour
-    que le clic tombe à l'endroit visé.
+    d'origine). Mode release : le curseur reste figé pendant tout le pincement. Mode press :
+    il suit la main en permanence, sauf bouton enfoncé sur place (voir _update_press_mode).
+
+    Clics épinglés (mode press, pointage absolu) : PressAt / ReleaseAt portent le point du
+    clic (contact, ou 1er clic d'un double-clic). En pointage relatif, la machine ne connaît
+    pas la position du curseur : Press / Release simples, sans double-clic aimanté.
     """
 
     def __init__(
@@ -115,10 +136,11 @@ class GestureStateMachine:
             min_palm_width=pinch.min_palm_width,
             min_closing_speed=pinch.min_closing_speed,
             min_closing_speed_3d=pinch.min_closing_speed_3d,
+            max_contact_speed=pinch.max_contact_speed,
         )
         self._pinch_detector = PinchHysteresis(
             pinch.rule, thresholds, pinch.exit, pinch.release_grace_ms, pinch.exit_on_fold,
-            pinch.release_cancel_margin,
+            pinch.release_cancel_margin, pinch.release_fast_margin, pinch.release_rise,
         )
         # Vitesse de fermeture des doigts (règles F / F3D, et colonnes du log).
         self._closing = ClosingSpeed()
@@ -138,25 +160,41 @@ class GestureStateMachine:
         # Mode de clic « press » (comme une souris) : bouton enfoncé dès le contact confirmé.
         self._pressed = False  # bouton de la souris enfoncé (Press émis, pas encore Release)
         self._pinch_frames = 0  # images consécutives de pincement depuis le contact
+        self._press_ms = 0.0  # instant du Press de l'appui en cours
         self._anchor: tuple[float, float] | None = None  # point de pointage au contact
         # Rattrapage : le curseur figé rejoint la main progressivement (voir _catch_up).
         self._catchup_from: tuple[float, float] | None = None  # position du curseur figé
         self._catchup_start_ms: float | None = None
+        # Clics épinglés (pointage absolu) : point de l'écran où l'appui en cours a été émis.
+        self._pin: tuple[float, float] | None = None
+        # Dernier clic sur place, pour aimanter le 2e clic d'un double-clic (voir _pin_point) :
+        # instant du Press, point épinglé, point de pointage au contact.
+        self._last_click_ms: float | None = None
+        self._last_click_pin: tuple[float, float] | None = None
+        self._last_click_anchor: tuple[float, float] | None = None
+        self._snapped = False  # l'appui en cours est aimanté sur le clic précédent
         # Pour le log : instant du contact du pincement dont le premier Press / Click vient
-        # d'être émis (None sinon), et distance au point d'ancrage pendant un appui.
+        # d'être émis (None sinon), distance au point d'ancrage pendant un appui, et type de
+        # l'événement épinglé de l'image ("press", "press_snap", "release", "release_snap").
         self.event_contact_ms: float | None = None
         self.anchor_distance: float | None = None
+        self.pin_kind = ""
 
     def update(
         self,
         t_ms: float,
         features: HandFeatures | None,
         pointer: tuple[float, float] | None,
+        wrist_speed: float | None = None,
     ) -> list[Event]:
-        """Fait avancer la machine d'une image. `features` et `pointer` valent None sans main."""
+        """Fait avancer la machine d'une image. `features` et `pointer` valent None sans main.
+
+        `wrist_speed` : vitesse du poignet (tailles de main / s), pour la condition facultative
+        `max_contact_speed` (None = inconnue, pas de refus)."""
         events: list[Event] = []
         self.event_contact_ms = None
         self.anchor_distance = None
+        self.pin_kind = ""
 
         # --- Pas de main visible ---
         if features is None or pointer is None:
@@ -177,6 +215,7 @@ class GestureStateMachine:
                 self._pinch_detector.reset()
                 self._below_since_ms = None
                 self._pressed = False
+                self._last_click_ms = None  # une série de clics ne survit pas à la veille
             return events
 
         self._last_seen_ms = t_ms
@@ -214,6 +253,7 @@ class GestureStateMachine:
                     events.append(Release())  # on ne laisse pas le bouton enfoncé
                 # Un pincement court en cours (mode release) est simplement annulé : pas de clic.
                 self._pressed = False
+                self._last_click_ms = None
                 self.state = State.IDLE
                 self._below_since_ms = None
                 self._arm_start_ms = None
@@ -223,8 +263,13 @@ class GestureStateMachine:
         else:
             self._below_since_ms = None
 
-        # --- Déplacement du curseur (sauf pendant un pincement court, pour un clic précis) ---
-        if self.state != State.PINCHING:
+        # --- Déplacement du curseur ---
+        # Figé pendant un pincement court, pour que le clic tombe à l'endroit visé : tout le
+        # pincement en mode release, seulement bouton enfoncé en mode press (le curseur reste
+        # alors au point épinglé : aucun déplacement bouton enfoncé, donc pas de mini-glisser).
+        frozen = self.state == State.PINCHING and (
+            self.pinch.click_mode != "press" or self._pressed)
+        if not frozen:
             if self.pointer.mode == "absolute":
                 target = zone_to_screen(pointer[0], pointer[1], self.pointer.zone)
                 target = self._catch_up(t_ms, target)
@@ -253,6 +298,10 @@ class GestureStateMachine:
                 features.palm_width,
                 self.closing_speed,
                 self.closing_speed_3d,
+                wrist_speed,
+                # Relâchement relatif (release_rise) : seulement pendant un appui sur place,
+                # jamais pendant un glisser (il y couperait le glisser, voir docs/journal.md).
+                self.pinch.click_mode == "press" and self.state == State.PINCHING,
             )
         if already_pinched:
             self.entry_block = "pincement_en_cours"
@@ -295,14 +344,16 @@ class GestureStateMachine:
     def _update_press_mode(self, t_ms, pinch_event, features, pointer, events) -> None:
         """Mode « press », comme une souris : c'est le système qui distingue clic et glisser.
 
-        - Contact (la détection dit « start ») : PINCHING ; le curseur se fige.
-        - Après `min_press_frames` images de pincement d'affilée : Press. Un pincement plus
-          bref (glitch du suivi) ne produit rien.
-        - Bouton enfoncé, le curseur reste figé tant que la main ne s'est pas éloignée du point
-          de contact de plus de `drag_threshold` tailles de main ; au-delà : DRAGGING, le
-          curseur suit (après un rattrapage progressif, voir _catch_up).
-        - Relâchement confirmé : Release. Clic sur place = Press puis Release au même point ;
-          deux clics rapides font un double-clic, comme avec une vraie souris.
+        - Contact (la détection dit « start ») : PINCHING ; le curseur suit encore la main.
+        - Après `min_press_frames` images de pincement d'affilée : Press, épinglé au point du
+          contact (PressAt en pointage absolu, voir _pin_point). Un pincement plus bref
+          (glitch du suivi) ne produit rien.
+        - Bouton enfoncé, le curseur reste au point épinglé tant que la main ne s'est pas
+          éloignée du point de contact de plus de `drag_threshold` tailles de main ; au-delà :
+          DRAGGING, le curseur suit (après un rattrapage progressif, voir _catch_up).
+        - Relâchement confirmé : ReleaseAt au point épinglé (clic sur place), ou Release
+          simple à la fin d'un glisser. Après un clic, le curseur rejoint la main tout de suite
+          (rattrapage) : plus de verrou.
         """
         if self.state == State.ACTIVE:
             if pinch_event == "start":
@@ -311,13 +362,13 @@ class GestureStateMachine:
                 self._pinch_frames = 1
                 self._anchor = pointer
                 self._pressed = False
-                self._press_if_confirmed(events)
+                self._press_if_confirmed(t_ms, features, events)
             return
 
         if self.state == State.PINCHING:
             if pinch_event == "end":
                 if self._pressed:
-                    events.append(Release())  # clic sur place
+                    self._release_in_place(t_ms, events)
                 # Sinon : pincement trop bref pour être confirmé, rien n'a été envoyé.
                 self._pressed = False
                 self.state = State.ACTIVE
@@ -327,26 +378,74 @@ class GestureStateMachine:
                 # confirmation : le pincement n'est alors plus « présent ».
                 if not self._pinch_detector.releasing:
                     self._pinch_frames += 1
-                    self._press_if_confirmed(events)
+                    self._press_if_confirmed(t_ms, features, events)
                 return
             self.anchor_distance = self._distance_from_anchor(pointer, features)
             if self.anchor_distance > self.pinch.drag_threshold:
                 self.state = State.DRAGGING  # la main part : c'est un glisser
+                self._last_click_ms = None  # un glisser interrompt la série de clics
                 self._start_catch_up(t_ms)
             return
 
         if self.state == State.DRAGGING:
             self.anchor_distance = self._distance_from_anchor(pointer, features)
             if pinch_event == "end":
-                events.append(Release())
+                events.append(Release())  # fin du glisser, à la position réelle
                 self._pressed = False
                 self.state = State.ACTIVE
 
-    def _press_if_confirmed(self, events: list[Event]) -> None:
-        if self._pinch_frames >= self.pinch.min_press_frames:
+    def _press_if_confirmed(self, t_ms: float, features, events: list[Event]) -> None:
+        if self._pinch_frames < self.pinch.min_press_frames:
+            return
+        self._pressed = True
+        self._press_ms = t_ms
+        self.event_contact_ms = self._pinch_start_ms
+        if self.pointer.mode != "absolute":
             events.append(Press())
-            self._pressed = True
-            self.event_contact_ms = self._pinch_start_ms
+            return
+        self._pin = self._pin_point(t_ms, features)
+        events.append(PressAt(self._pin[0], self._pin[1]))
+        self.pin_kind = "press_snap" if self._snapped else "press"
+        # Le curseur est désormais au point épinglé : point de départ du rattrapage à venir.
+        self._last_target = self._pin
+
+    def _pin_point(self, t_ms: float, features) -> tuple[float, float]:
+        """Point de l'écran où émettre le Press : le point du contact, ou, pour le 2e clic
+        d'un double-clic, les coordonnées exactes du 1er clic.
+
+        Windows ne reconnaît un double-clic que si les deux clics tombent à ±2 pixels
+        (SM_CXDOUBLECLK = 4) et à moins du délai de double-clic du système. Entre deux tapes,
+        la main se déplace de 1 à 21 px (logs du 2026-11-24 et du 2026-11-25). Le 2e appui est
+        donc « aimanté » sur le 1er s'il arrive à moins de `double_click_ms` du Press précédent
+        ET à moins de `double_click_snap` tailles de main de son point de contact. Une série
+        (triple-clic) reste aimantée sur le point du 1er clic."""
+        own = zone_to_screen(self._anchor[0], self._anchor[1], self.pointer.zone)
+        self._snapped = False
+        if self._last_click_ms is None or self.pinch.double_click_snap <= 0:
+            return own
+        if t_ms - self._last_click_ms > self.pinch.double_click_ms:
+            return own
+        size = features.hand_size if features.hand_size > 1e-6 else 1e-6
+        dx = self._anchor[0] - self._last_click_anchor[0]
+        dy = self._anchor[1] - self._last_click_anchor[1]
+        if (dx * dx + dy * dy) ** 0.5 / size > self.pinch.double_click_snap:
+            return own
+        self._snapped = True
+        self._anchor = self._last_click_anchor  # la série garde le point du 1er clic
+        return self._last_click_pin
+
+    def _release_in_place(self, t_ms: float, events: list[Event]) -> None:
+        """Fin d'un clic sur place : Release au point épinglé, puis le curseur rejoint la main."""
+        if self.pointer.mode != "absolute":
+            events.append(Release())
+            return
+        events.append(ReleaseAt(self._pin[0], self._pin[1]))
+        self.pin_kind = "release_snap" if self._snapped else "release"
+        # Mémorisé pour aimanter le clic suivant (double-clic) : instant du Press.
+        self._last_click_ms = self._press_ms
+        self._last_click_pin = self._pin
+        self._last_click_anchor = self._anchor
+        self._start_catch_up(t_ms)
 
     def _distance_from_anchor(self, pointer, features) -> float:
         """Distance du point de pointage au point de contact, en tailles de main."""
@@ -361,10 +460,10 @@ class GestureStateMachine:
         self._catchup_from = self._last_target
 
     def _catch_up(self, t_ms: float, target: tuple[float, float]) -> tuple[float, float]:
-        """Quand le curseur cesse d'être figé (début d'un glisser ; pointage absolu), il
-        rejoint la main progressivement pendant `drag_catchup_ms` au lieu de sauter du point
-        figé à la main (le saut vaut jusqu'à drag_threshold tailles de main, une centaine de
-        pixels).
+        """Quand le curseur cesse d'être figé (début d'un glisser, fin d'un clic ; pointage
+        absolu), il rejoint la main progressivement pendant `drag_catchup_ms` au lieu de sauter
+        du point figé à la main (le saut vaut jusqu'à drag_threshold tailles de main, une
+        centaine de pixels, ou double_click_snap après un double-clic aimanté).
         Interpolation linéaire : figé + k x (main - figé), k passant de 0 à 1."""
         if (self._catchup_start_ms is None or self._catchup_from is None
                 or self.pinch.drag_catchup_ms <= 0):

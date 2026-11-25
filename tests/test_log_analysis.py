@@ -27,15 +27,18 @@ from airdesk.log_analysis import (
     Pinch,
     Row,
     block_reason,
+    contact_speeds,
     estimated_latencies,
     latencies,
     mean_and_p95,
     percentile,
+    pin_offsets,
     pinch_durations,
     pinch_thresholds,
     press_episodes,
     read_log,
     read_metadata,
+    rise_splits,
     still_periods,
     summarize,
     text_histogram,
@@ -386,10 +389,13 @@ def test_new_log_columns_round_trip(tmp_path):
                      folder=tmp_path, now=datetime(2026, 11, 24, 18, 0, 0))
     with log:
         log.write_frame(0, FakeFeatures(0.1, 4), "actif", [], 9.0, closing_speed=1.5,
-                        closing_speed_3d=1.2, entry_block="paume", tracker_hands=1)
+                        closing_speed_3d=1.2, entry_block="paume", tracker_hands=1,
+                        pin_kind="press_snap", pin_offset_px=12.34)
     row = read_log(log.csv_path)[0]
     assert row.entry_block == "paume"
     assert row.tracker_hands == 1
+    assert row.pin_kind == "press_snap"
+    assert row.pin_offset_px == 12.3
 
 
 # --- Mode press : latence, déplacement pendant les clics, saut au début des glisser -----------
@@ -458,3 +464,86 @@ def test_estimated_latency_for_old_logs():
     found = estimated_latencies(rows, [Pinch(33, 333, OUTCOME_CLICK, END_RELEASED)])
     assert [x.latency_ms for x in found] == [367]
 
+
+def test_contact_speeds_of_clicks_and_drags():
+    def r(t, state, events=(), speed=0.3):
+        return Row(t, True, 0.1, 3, state, list(events), 9.0, wrist_speed=speed)
+
+    rows = [
+        r(0, "actif"),
+        r(33, "pincement", speed=0.4),  # contact d'un clic (mode press)
+        r(66, "pincement", ["press"]),
+        r(99, "actif", ["release"]),
+        r(500, "actif"),
+        r(533, "pincement", speed=3.06),  # contact d'un glisser en plein mouvement
+        r(566, "pincement", ["press"]),
+        r(599, "glisser"),
+        r(632, "actif", ["release"]),
+        r(900, "actif"),
+        r(933, "pincement", speed=2.0),  # pincement sans issue : ignoré
+        r(966, "actif"),
+    ]
+    found = contact_speeds(rows)
+    assert [(c.contact_ms, c.speed, c.outcome) for c in found] == [
+        (33, 0.4, OUTCOME_CLICK), (533, 3.06, OUTCOME_DRAG)]
+
+
+# --- Clics épinglés et relâchement relatif ------------------------------------------------------
+
+
+def test_pinned_events_count_as_clicks_and_presses():
+    """Logs du 2026-11-25 : PressAt / ReleaseAt s'écrivent « pressat » / « releaseat »."""
+    rows = []
+    for row in press_log():
+        events = []
+        for name in row.events:
+            events.append({"press": "pressat", "release": "releaseat"}.get(name, name))
+        row.events = events
+        rows.append(row)
+    rows[-1].events = ["release"]  # fin de glisser : Release simple
+    s = summarize(rows)
+    assert (s.clicks, s.drags) == (1, 1)
+    clicks, drag = press_episodes(rows)
+    assert not clicks.dragged
+    assert drag.dragged
+
+
+def test_pin_offsets_by_kind():
+    rows = [
+        Row(0, True, 0.1, 3, "pincement", ["pressat"], 9.0, pin_kind="press", pin_offset_px=2.0),
+        Row(33, True, 0.8, 3, "actif", ["releaseat"], 9.0, pin_kind="release", pin_offset_px=8.0),
+        Row(66, True, 0.1, 3, "pincement", ["pressat"], 9.0, pin_kind="press_snap",
+            pin_offset_px=21.0),
+        Row(99, True, 0.8, 3, "actif", [], 9.0),
+    ]
+    assert pin_offsets(rows) == {"press": [2.0], "release": [8.0], "press_snap": [21.0]}
+
+
+def rise_row(t, ratio, state, cursor=(1000, 500)):
+    return Row(t, True, ratio, 3, state, [], 9.0, cursor=cursor)
+
+
+def test_rise_splits_a_click_with_two_dips():
+    """Courbe du 13 250 ms (log 16-35-12) : 0,11 -> 0,39 -> 0,13, main immobile."""
+    rows = [rise_row(0, 0.6, "actif")]
+    ratios = [0.18, 0.12, 0.11, 0.24, 0.39, 0.36, 0.16, 0.13, 0.30, 0.40]
+    for i in range(len(ratios)):
+        rows.append(rise_row(33 * (i + 1), ratios[i], "pincement"))
+    rows.append(rise_row(400, 0.45, "actif"))
+    splits = rise_splits(rows, 0.15, 0.25, 95)
+    assert [(x.release_ms, x.contact_ms, x.in_drag) for x in splits] == [(165, 231, False)]
+    assert rise_splits(rows, 0.30, 0.25, 95) == []  # remontée de 0,28 seulement
+
+
+def test_rise_splits_count_drag_ruptures_only_before_the_guard():
+    rows = [rise_row(0, 0.6, "actif")]
+    # Remontée pendant que la main est encore sur place : rupture du glisser.
+    rows.append(rise_row(33, 0.10, "pincement"))
+    rows.append(rise_row(66, 0.30, "pincement"))
+    rows.append(rise_row(99, 0.10, "glisser", cursor=(1200, 500)))
+    # Main partie (200 px > 95) : une nouvelle remontée ne compte plus.
+    rows.append(rise_row(132, 0.30, "glisser", cursor=(1300, 500)))
+    rows.append(rise_row(165, 0.10, "glisser", cursor=(1300, 500)))
+    rows.append(rise_row(198, 0.6, "actif"))
+    splits = rise_splits(rows, 0.15, 0.25, 95)
+    assert [(x.release_ms, x.in_drag) for x in splits] == [(66, True)]

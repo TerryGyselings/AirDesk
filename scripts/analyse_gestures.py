@@ -343,10 +343,20 @@ def closing_threshold(separations, descriptor: str) -> float:
     return 0.0
 
 
+def contact_speed_threshold(separations) -> float:
+    """Vitesse maximale du poignet au contact proposée (règle G) : retenue seulement si les
+    vrais pincements se font main PLUS lente (sens « valeur basse = pincement ») ; sinon 0,
+    c'est-à-dire sans condition."""
+    for sep in separations:
+        if sep.descriptor == "wrist_speed" and not sep.higher_is_pinch:
+            return sep.proposal.threshold
+    return 0.0
+
+
 def print_left_profile(train, test, learned: RuleThresholds, exit_: float, click_max_ms: float,
                        seconds: int, test_seconds: int) -> None:
     """Main tournée vers la gauche (protocole v4) : quel indice sépare les vrais pincements
-    du pivot de profil, et que donnent les règles A, D, E, F, F3D, D + paume ?"""
+    du pivot de profil, et que donnent les règles A, D, E, F, F3D, G, D + paume ?"""
     if not has_profile_data(train):
         print("  Pas de séquence du protocole v4 (pincements_repetes_gauche, "
               "main_repos_profil_gauche, va_et_vient_gauche) dans l'entraînement : enregistrer "
@@ -378,31 +388,36 @@ def print_left_profile(train, test, learned: RuleThresholds, exit_: float, click
 
     min_closing = closing_threshold(separations, "closing_speed")
     min_closing_3d = closing_threshold(separations, "closing_speed_3d")
+    max_speed = contact_speed_threshold(separations)
     print(f"\n  Seuils proposés : min_closing_speed = {min_closing:.2f}, "
-          f"min_closing_speed_3d = {min_closing_3d:.2f} (0 = pas de séparation dans le bon "
-          "sens)")
+          f"min_closing_speed_3d = {min_closing_3d:.2f}, max_contact_speed = {max_speed:.2f} "
+          "(0 = pas de séparation dans le bon sens)")
 
     current = load_config(local_path=None).pinch
     thresholds = replace(learned, min_closing_speed=min_closing,
                          min_closing_speed_3d=min_closing_3d)
     palm = replace(thresholds, require_palm_facing=True)
+    slow = replace(thresholds, max_contact_speed=max_speed)
+
+    def settings(rule, rule_thresholds, measure="ratio"):
+        # Délai et marges de relâchement en service (config/gestures.yaml).
+        return EpisodeSettings(rule, rule_thresholds, exit_, current.release_grace_ms,
+                               measure=measure,
+                               release_cancel_margin=current.release_cancel_margin,
+                               release_fast_margin=current.release_fast_margin)
+
     candidates = [
-        ("A", EpisodeSettings("A", thresholds, exit_, current.release_grace_ms,
-                              release_cancel_margin=current.release_cancel_margin)),
-        ("D", EpisodeSettings("D", thresholds, exit_, current.release_grace_ms,
-                              release_cancel_margin=current.release_cancel_margin)),
-        ("E (D, 3D)", EpisodeSettings("D", thresholds, exit_, current.release_grace_ms,
-                                      measure="ratio3d",
-                                      release_cancel_margin=current.release_cancel_margin)),
-        ("F", EpisodeSettings("F", thresholds, exit_, current.release_grace_ms,
-                              release_cancel_margin=current.release_cancel_margin)),
-        ("F3D", EpisodeSettings("F3D", thresholds, exit_, current.release_grace_ms,
-                                release_cancel_margin=current.release_cancel_margin)),
-        ("D + paume", EpisodeSettings("D", palm, exit_, current.release_grace_ms,
-                                      release_cancel_margin=current.release_cancel_margin)),
+        ("A", settings("A", thresholds)),
+        ("D", settings("D", thresholds)),
+        ("E (D, 3D)", settings("D", thresholds, measure="ratio3d")),
+        ("F", settings("F", thresholds)),
+        ("F3D", settings("F3D", thresholds)),
+        ("G (D+vit.)", settings("D", slow)),
+        ("D + paume", settings("D", palm)),
     ]
-    print(f"\n  Épisodes (délai {current.release_grace_ms:g} ms, marge d'annulation "
-          f"{current.release_cancel_margin:g}, enter {enter} / exit {exit_}) ; cellules "
+    print(f"\n  Épisodes (délai {current.release_grace_ms:g} ms, marges d'annulation "
+          f"{current.release_cancel_margin:g} / relâchement rapide "
+          f"{current.release_fast_margin:g}, enter {enter} / exit {exit_}) ; cellules "
           "entraînement / test :")
     print(f"    {'règle':<11} | {'faux clics profil':<17} | {'faux gliss. profil':<18} | "
           f"{'répétés':<13} | {'répétés gauche':<14}")

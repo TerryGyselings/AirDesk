@@ -43,6 +43,7 @@ from airdesk.gesture_analysis import (
     entry_details,
     entry_moments,
     entry_separations,
+    entry_value,
     episode_metrics,
     frame_samples,
     has_profile_data,
@@ -710,3 +711,52 @@ def test_profile_metrics_compare_rules():
 def test_has_profile_data(train):
     assert not has_profile_data(train)
     assert has_profile_data(v4_samples())
+
+
+# --- Règle G : vitesse du poignet au contact -----------------------------------------------------
+
+
+def with_speed(samples, speed):
+    for s in samples:
+        s.wrist_speed = speed
+    return samples
+
+
+def test_rule_g_refuses_pinches_during_fast_moves():
+    """Vrais pincements main immobile (0,3) ; va-et-vient rapide (2,5) qui ferme les doigts
+    aussi vite qu'un vrai pincement : seule la vitesse du poignet les distingue."""
+    samples = with_speed(fast_pinches("pincements_repetes"), 0.3)
+    samples += with_speed(fast_pinches("pincements_repetes_gauche"), 0.3)
+    samples += with_speed(fast_pinches("va_et_vient_gauche"), 2.5)
+    add_closing_speeds(samples)
+    plain = profile_metrics(samples, settings("D"), click_max_ms=400, seconds=1)
+    slow = EpisodeSettings("D", replace(T, max_contact_speed=1.8), 0.40)
+    with_g = profile_metrics(samples, slow, click_max_ms=400, seconds=1)
+    assert plain.false_clicks + plain.false_drags == 3
+    assert with_g.false_clicks + with_g.false_drags == 0
+    assert with_g.detected["pincements_repetes_gauche"][0] == 3
+
+
+def test_wrist_speed_is_an_entry_descriptor():
+    samples = with_speed(fast_pinches("pincements_repetes"), 0.3)
+    samples += with_speed(fast_pinches("va_et_vient_gauche"), 2.5)
+    add_closing_speeds(samples)
+    by_name = {}
+    for sep in entry_separations(samples, 0.25):
+        by_name[sep.descriptor] = sep
+    assert not by_name["wrist_speed"].higher_is_pinch  # vrais pincements : main plus lente
+    assert by_name["wrist_speed"].proposal.youden_j == 1.0
+    assert entry_value("wrist_speed", samples[0]) == 0.3
+
+
+def test_wrist_speed_is_read_from_the_dataset(tmp_path):
+    path = tmp_path / "v4.csv"
+    path.write_text(
+        "label,t_in_sequence_ms,hand_present,pinch_ratio,hand_size,ext_index,ext_middle,"
+        "ext_ring,ext_pinky,ext3d_index,ext3d_middle,ext3d_ring,ext3d_pinky,wrist_speed\n"
+        "va_et_vient_gauche,0,1,0.5,0.2,1.4,1.5,1.5,1.5,1.4,1.5,1.5,1.5,2.4\n"
+        "va_et_vient_gauche,33,1,0.5,0.2,1.4,1.5,1.5,1.5,1.4,1.5,1.5,1.5,\n",
+        encoding="utf-8")
+    samples = read_dataset(path)
+    assert samples[0].wrist_speed == 2.4
+    assert samples[1].wrist_speed is None

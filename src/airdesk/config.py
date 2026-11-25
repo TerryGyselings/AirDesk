@@ -55,6 +55,11 @@ class PinchConfig:
     # Un relâchement en cours n'est annulé que si la mesure redescend sous exit - cette marge
     # (0 = comportement d'origine). Voir PinchHysteresis.
     release_cancel_margin: float = 0.0
+    # Relâchement immédiat au-dessus de exit + cette marge (doigts franchement ouverts).
+    # 0 = désactivé (toujours le délai release_grace_ms).
+    release_fast_margin: float = 0.0
+    # Vitesse du poignet maximale au contact (tailles de main / s). 0 = pas de condition.
+    max_contact_speed: float = 0.0
     # Mode de clic : "release" (clic émis au relâchement, d'origine) ou "press" (comme une
     # souris : Press dès le contact confirmé, Release au relâchement ; le système distingue
     # clic et glisser). En mode press :
@@ -62,6 +67,15 @@ class PinchConfig:
     min_press_frames: int = 2  # images de pincement d'affilée avant Press (anti-glitch)
     drag_threshold: float = 0.15  # tailles de main : au-delà, le curseur suit (glisser)
     drag_catchup_ms: float = 100  # rattrapage progressif du curseur au début du glisser
+    # Double-clic aimanté (mode press, pointage absolu) : un 2e Press à moins de
+    # double_click_ms du précédent et à moins de double_click_snap tailles de main de son point
+    # de contact est émis au pixel du 1er clic. Dans gestures.yaml, double_click_ms "auto" =
+    # délai de double-clic du système (lu par app.py). double_click_snap 0 = pas d'aimant.
+    double_click_ms: float | str = 500
+    double_click_snap: float = 0.0
+    # Relâchement relatif : remontée de la mesure au-dessus de son minimum pendant l'appui,
+    # pendant un appui sur place seulement. 0 = désactivé.
+    release_rise: float = 0.0
     # Règles F / F3D (non branchées) : vitesse de fermeture minimale des doigts.
     min_closing_speed: float = 0.0
     min_closing_speed_3d: float = 0.0

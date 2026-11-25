@@ -71,6 +71,10 @@ COLUMNS = (
         "contact_ms",
         # Mode press : distance de la main au point de contact (tailles de main) pendant l'appui
         "anchor_distance",
+        # Clic épinglé de l'image : press, press_snap (2e clic aimanté), release, release_snap
+        "pin_kind",
+        # Écart en px entre la main et le point épinglé (ce que l'épinglage corrige)
+        "pin_offset_px",
     ]
 )
 
@@ -210,6 +214,8 @@ class SessionLog:
         tracker_hands: int | None = None,
         contact_ms: float | None = None,
         anchor_distance: float | None = None,
+        pin_kind: str = "",
+        pin_offset_px: float | None = None,
     ) -> None:
         """Une ligne par image. `features` vaut None quand aucune main n'est visible.
 
@@ -237,6 +243,8 @@ class SessionLog:
         row.append("" if tracker_hands is None else tracker_hands)
         row.append("" if contact_ms is None else int(contact_ms))
         row.append(optional(anchor_distance, 3))
+        row.append(pin_kind)
+        row.append(optional(pin_offset_px, 1))
         self._writer.writerow(row)
 
     def __exit__(self, *exc) -> None:

@@ -30,11 +30,20 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
 
 - **`press` (par défaut), comme une souris** : le bouton est enfoncé dès que le pincement
   est confirmé (`min_press_frames` images, 2 par défaut), et relâché quand les doigts
-  s'ouvrent. Pendant l'appui, le curseur reste **figé** tant que la main ne s'éloigne pas du
-  point de contact de plus de `drag_threshold` (0,15 taille de main) ; au-delà, il suit la
-  main (glisser) et la rejoint en `drag_catchup_ms` (100 ms) au lieu de sauter. C'est
-  Windows qui distingue clic, double-clic et glisser. Le clic part environ 1 image après
-  le contact.
+  s'ouvrent. Le curseur suit la main en permanence, **sauf bouton enfoncé sur place** : il
+  reste alors au point du clic, pour qu'aucun mini-glisser ne parte. Le clic est **épinglé**
+  au point du contact (Press et Release émis à ce point). Si la main s'éloigne de plus de
+  `drag_threshold` (0,15 taille de main), c'est un glisser : le curseur rejoint la main en
+  `drag_catchup_ms` (100 ms) au lieu de sauter. Le clic part environ 1 image après le
+  contact.
+- **Double-clic aimanté** : un 2e appui dans le délai de double-clic du système
+  (`double_click_ms: auto`) et à moins de `double_click_snap` (0,08 taille de main) du 1er
+  est émis au pixel exact du 1er clic : Windows exige ±2 px, la main bouge de 1 à 21 px
+  entre deux tapes.
+- **Relâchement relatif** (`release_rise`, activé à 0,15, validé en réel le 25/11) : sépare
+  deux tapes rapides dont la remontée entre les deux creux n'atteint pas `exit`. Il n'agit
+  que pendant un appui sur place, pas pendant un glisser ; `analyse_log.py` affiche son
+  rejeu sur chaque log (ruptures de glisser éventuelles).
 - **`release` (d'origine, pour comparer)** : le clic n'est émis qu'au relâchement ; un
   pincement plus long que `click_max_ms` (0,4 s) devient un glisser. Délai ressenti :
   environ 360 ms entre le contact et le clic.
@@ -172,8 +181,9 @@ python scripts/analyse_log.py      # analyse le log le plus récent
   émis, temps de traitement, **`entry_block`** (pourquoi un pincement ne peut pas commencer :
   `veille`, `hors_zone`, `ratio`, `paume`, `autres_doigts`...), **`tracker_hands`** (1 ou
   2 mains demandées à MediaPipe), **`contact_ms`** (instant du contact des doigts, sur
-  l'image du premier Press / Click) et **`anchor_distance`** (mode press : distance de la
-  main au point de contact). **Aucune image** (RGPD) ;
+  l'image du premier Press / Click), **`pin_kind`** et **`pin_offset_px`** (clic épinglé :
+  type et écart en pixels entre la main et le point épinglé) et **`anchor_distance`** (mode
+  press : distance de la main au point de contact). **Aucune image** (RGPD) ;
 - `AAAA-MM-JJ_HH-MM-SS.json` : les réglages en vigueur (config complète fusionnée, version,
   commit git et modifications non commitées, système, caméra réellement ouverte).
 
@@ -181,7 +191,9 @@ python scripts/analyse_log.py      # analyse le log le plus récent
 puis séparément en mode 1 main et 2 mains, pour localiser les pics), le nombre de clics et
 de glisser, la **latence contact → Press/Click** (moyenne et P95 ; estimée depuis
 `pinch_ratio` pour les anciens logs), en mode press le déplacement de la main pendant les
-clics (pour régler `drag_threshold`) et le saut du curseur au début de chaque glisser, pour
+clics (pour régler `drag_threshold`), le saut du curseur au début de chaque glisser, la
+répartition des écarts des clics épinglés, le rejeu de `release_rise` (ruptures de glisser
+et appuis de clic coupés pour 0,12 / 0,15 / 0,18), pour
 chaque pincement sans issue la raison du refus (`entry_block`), puis la durée de chaque
 pincement avec un histogramme texte
 et la position de `click_max_ms`. Les durées sont calculées à partir de `pinch_ratio` et des

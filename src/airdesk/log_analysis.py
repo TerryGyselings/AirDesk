@@ -34,6 +34,8 @@ class Row:
     tracker_hands: int | None = None  # mains demandées à MediaPipe (1 ou 2)
     contact_ms: float | None = None  # contact des doigts, sur l'image du premier Press/Click
     anchor_distance: float | None = None  # mode press : distance au point de contact
+    pin_kind: str = ""  # clic épinglé : press, press_snap, release, release_snap
+    pin_offset_px: float | None = None  # écart main -> point épinglé (px)
 
 
 def optional_float(record: dict, name: str) -> float | None:
@@ -79,6 +81,8 @@ def read_log(path: Path) -> list[Row]:
                     else None,
                     contact_ms=optional_float(record, "contact_ms"),
                     anchor_distance=optional_float(record, "anchor_distance"),
+                    pin_kind=record.get("pin_kind") or "",
+                    pin_offset_px=optional_float(record, "pin_offset_px"),
                 )
             )
     return rows
@@ -227,6 +231,16 @@ def pinch_thresholds(metadata: dict) -> tuple[float, float, float]:
     return pinch["enter"], pinch["exit"], pinch["click_max_ms"]
 
 
+def has_press(events: list[str]) -> bool:
+    """Bouton enfoncé à cette image : Press, ou PressAt (clic épinglé, logs du 2026-11-25)."""
+    return "press" in events or "pressat" in events
+
+
+def has_release(events: list[str]) -> bool:
+    """Bouton relâché à cette image : Release, ou ReleaseAt (clic épinglé)."""
+    return "release" in events or "releaseat" in events
+
+
 def click_mode(metadata: dict) -> str:
     """Mode de clic de la session ("release" pour les logs d'avant le mode press)."""
     return metadata["config"]["pinch"].get("click_mode", "release")
@@ -273,7 +287,7 @@ def summarize(rows: list[Row]) -> Summary:
         processing.append(row.processing_ms)
         if "click" in row.events:
             clicks += 1
-        if "release" in row.events and previous_state == "pincement":
+        if has_release(row.events) and previous_state == "pincement":
             clicks += 1
         if row.state == "glisser" and previous_state != "glisser":
             drags += 1
@@ -429,7 +443,7 @@ def outcome_of(events: list[str], dragged: bool) -> str:
     Release sans passer en glisser ; en mode release, c'est un Click."""
     if dragged:
         return OUTCOME_DRAG
-    if "click" in events or "press" in events:
+    if "click" in events or has_press(events):
         return OUTCOME_CLICK
     return OUTCOME_NONE
 
@@ -528,7 +542,7 @@ def estimated_latencies(rows: list[Row], pinches: list[Pinch]) -> list[Latency]:
         for row in rows:
             if row.timestamp_ms < start or row.timestamp_ms > limit:
                 continue
-            if "click" in row.events or "press" in row.events:
+            if "click" in row.events or has_press(row.events):
                 event = "click" if "click" in row.events else "press"
                 found.append(Latency(start, row.timestamp_ms, event))
                 break
@@ -559,7 +573,7 @@ def press_episodes(rows: list[Row]) -> list[PressEpisode]:
     current = None
     anchor_cursor = None
     for row in rows:
-        if "press" in row.events and current is None:
+        if has_press(row.events) and current is None:
             current = PressEpisode(row.timestamp_ms, None, False, None)
             anchor_cursor = row.cursor
             continue
@@ -575,10 +589,135 @@ def press_episodes(rows: list[Row]) -> list[PressEpisode]:
                 dx = row.cursor[0] - anchor_cursor[0]
                 dy = row.cursor[1] - anchor_cursor[1]
                 current.jump_px = math.hypot(dx, dy)
-        if "release" in row.events:
+        if has_release(row.events):
             episodes.append(current)
             current = None
     if current is not None:
         episodes.append(current)
     return episodes
 
+
+# --- Vitesse du poignet au contact (condition « mouvement », max_contact_speed) -------------
+
+
+@dataclass
+class ContactSpeed:
+    """Un pincement qui a donné un clic ou un glisser, et la vitesse du poignet au contact."""
+
+    contact_ms: int
+    speed: float  # tailles de main / s, à l'image du contact
+    outcome: str  # OUTCOME_CLICK ou OUTCOME_DRAG
+
+
+def contact_speeds(rows: list[Row]) -> list[ContactSpeed]:
+    """Contact = première image à l'état « pincement » après « actif » (les deux modes de
+    clic). Issue : glisser si la machine passe à l'état « glisser », clic si un Click ou un
+    Release arrive avant ; les pincements sans issue sont ignorés."""
+    found = []
+    for i in range(1, len(rows)):
+        row = rows[i]
+        if row.state != "pincement" or rows[i - 1].state != "actif":
+            continue
+        if row.wrist_speed is None:
+            continue
+        outcome = None
+        for later in rows[i:]:
+            if later.state == "glisser":
+                outcome = OUTCOME_DRAG
+                break
+            if "click" in later.events or has_release(later.events):
+                outcome = OUTCOME_CLICK
+                break
+            if later.state != "pincement":
+                break
+        if outcome is not None:
+            found.append(ContactSpeed(row.timestamp_ms, row.wrist_speed, outcome))
+    return found
+
+
+# --- Clics épinglés : écart entre la main et le point épinglé --------------------------------
+
+
+def pin_offsets(rows: list[Row]) -> dict[str, list[float]]:
+    """Écarts (px) entre la main et le point épinglé, par type d'événement épinglé (press,
+    press_snap, release, release_snap). press : dérive pendant les min_press_frames images ;
+    release : dérive pendant l'appui ; *_snap : distance au 1er clic d'un double-clic."""
+    found: dict[str, list[float]] = {}
+    for row in rows:
+        if row.pin_kind and row.pin_offset_px is not None:
+            if row.pin_kind not in found:
+                found[row.pin_kind] = []
+            found[row.pin_kind].append(row.pin_offset_px)
+    return found
+
+
+# --- Relâchement relatif (release_rise) : rejeu sur pinch_ratio -------------------------------
+
+
+@dataclass
+class RiseSplit:
+    """Un relâchement relatif simulé suivi d'un nouveau contact dans le même appui."""
+
+    release_ms: int  # instant du relâchement relatif
+    contact_ms: int  # instant du nouveau contact
+    in_drag: bool  # l'appui (tel qu'enregistré) est passé en glisser : une rupture
+
+
+def rise_splits(rows: list[Row], rise: float, enter: float, guard_px: float) -> list[RiseSplit]:
+    """Rejoue `release_rise` sur les appuis enregistrés (images à l'état « pincement » ou
+    « glisser » d'affilée) et liste les endroits où il couperait l'appui en deux.
+
+    Simulation simplifiée, sur pinch_ratio seul :
+    - relâchement si la mesure dépasse son minimum depuis le contact de `rise` et dépasse
+      enter, seulement tant que la main est à moins de `guard_px` pixels du point de contact
+      (la garde de la machine : drag_threshold, ici en pixels, car le log ne garde pas la
+      taille de la main ; 0,15 taille de main ≈ 95 px, voir docs/journal.md) ;
+    - nouveau contact quand la mesure repasse sous enter (sans les autres conditions de la
+      règle D).
+    Dans un appui passé en glisser, chaque coupure est une rupture du glisser (in_drag)."""
+    splits: list[RiseSplit] = []
+    episode: list[Row] = []
+    for row in rows:
+        if row.state in ("pincement", "glisser"):
+            episode.append(row)
+            continue
+        if episode:
+            splits += _rise_splits_in_episode(episode, rise, enter, guard_px)
+            episode = []
+    if episode:  # log terminé pendant un appui
+        splits += _rise_splits_in_episode(episode, rise, enter, guard_px)
+    return splits
+
+
+def _rise_splits_in_episode(episode, rise, enter, guard_px) -> list[RiseSplit]:
+    in_drag = False
+    for row in episode:
+        if row.state == "glisser":
+            in_drag = True
+    found = []
+    minimum = None
+    anchor = None
+    moved = False
+    released_at = None
+    for row in episode:
+        if row.pinch_ratio is None:
+            continue
+        if anchor is None:
+            anchor = row.cursor
+        if not moved and anchor is not None and row.cursor is not None:
+            dx = row.cursor[0] - anchor[0]
+            dy = row.cursor[1] - anchor[1]
+            moved = math.hypot(dx, dy) > guard_px
+        if released_at is not None:
+            if row.pinch_ratio < enter:  # nouveau contact
+                found.append(RiseSplit(released_at, row.timestamp_ms, in_drag))
+                released_at = None
+                minimum = row.pinch_ratio
+                anchor = row.cursor
+                moved = False
+            continue
+        if minimum is None or row.pinch_ratio < minimum:
+            minimum = row.pinch_ratio
+        if not moved and row.pinch_ratio >= minimum + rise and row.pinch_ratio >= enter:
+            released_at = row.timestamp_ms
+    return found
