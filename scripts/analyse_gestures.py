@@ -53,7 +53,7 @@ from airdesk.gesture_analysis import (
     sweep,
     thresholds_from_proposals,
 )
-from airdesk.interpretation.pinch_rules import RULES, RuleThresholds
+from airdesk.interpretation.pinch_rules import RULES, RuleThresholds, rule_has_entry_condition
 from airdesk.log_analysis import read_metadata
 
 SHORT_NAMES = {
@@ -189,6 +189,11 @@ def print_rules(samples, thresholds: RuleThresholds, exit_: float, seconds: int)
         c = confusion(samples, rule, thresholds)
         total = c.true_positives + c.false_negatives
         line = f"  {rule:<5} | {c.true_positives:>4}/{total:<4} {c.recall * 100:5.1f} % "
+        if rule_has_entry_condition(rule):
+            # Condition d'entrée (vitesse de fermeture) : elle ne se voit qu'au contact, qui
+            # a lieu AVANT la fenêtre mesurée (première seconde ignorée). Pincement maintenu =
+            # doigts immobiles = refusé : le rappel image par image n'a pas de sens.
+            line = f"  {rule:<5} | {'non mesurable *':<17} "
         for label in NEGATIVE_LABELS:
             cell = f"{c.false_positives[label]}/{c.negatives[label]}"
             line += f" | {cell:<12}"
@@ -203,6 +208,8 @@ def print_rules(samples, thresholds: RuleThresholds, exit_: float, seconds: int)
     print("  rappel = images de pincement maintenu reconnues ; FP x/n = faux pincements sur n")
     print("  images ; repetes = épisodes détectés / attendus ; hors voc. = épisodes dans le")
     print("  pincement index vers la caméra (hors vocabulaire, pour information).")
+    print("  * F / F3D : condition d'entrée (vitesse de fermeture), invisible pendant un")
+    print("  pincement maintenu ; leur rappel se lit dans la colonne « repetes » (épisodes).")
 
 
 def pair(train_value, test_value) -> str:

@@ -56,6 +56,10 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
 - **Geste de pincement : le « OK »**. Le bout du pouce touche le bout de l'index, **paume
   tournée vers l'écran**, les autres doigts **détendus** (ni serrés en poing, ni crispés).
   Pendant un glisser, garder pouce et index collés et bouger la main sans à-coups.
+  **Fermer franchement les doigts** (règle F, à l'essai) : un pouce qui se pose lentement
+  contre l'index (main au repos de profil) n'est pas pris pour un pincement. Main tournée
+  vers la gauche, les autres doigts paraissent plus courts à l'image : ils restent acceptés
+  (`fingers.folded_below` 0,65, qui ne sert plus qu'à refuser le poing).
 - **Non reconnu** : le pincement index pointé vers la caméra, autres doigts repliés. C'est
   une décision de conception : ce geste ressemble trop à un poing pour être distingué de
   façon fiable. Une main au repos **de profil** (pouce contre l'index) peut encore être prise
@@ -240,8 +244,10 @@ python scripts/analyse_gestures.py data/datasets/A.csv data/datasets/B.csv --tes
   2 s). L'analyse compare, au moment où les doigts passent sous `enter`, `pinch_ratio`,
   `pinch_ratio_3d`, la vitesse de fermeture (2D et 3D) et `palm_width`, et les règles A, D,
   E (D en 3D), F et F3D (D + fermeture minimale).
-- **Configuration en service** (`config/gestures.yaml`) : règle D, mesure `ratio`,
-  enter 0,25 / exit 0,40, délai de relâchement 66 ms, sans sortie sur repli. `rule: A` et
+- **Configuration en service** (`config/gestures.yaml`) : **règle F à l'essai** (D + doigts
+  qui se ferment au contact, `min_closing_speed` 0,4, exemption de 300 ms après un
+  relâchement pour la 2e tape d'un double-clic), mesure `ratio`, enter 0,25 / exit 0,40,
+  délai de relâchement 66 ms, sans sortie sur repli. Repli : `rule: D`. `rule: A` et
   `release_grace_ms: 0` redonnent le comportement d'origine, pour comparer.
 - Descripteur clé, l'**extension** d'un doigt : distance bout du doigt → centre de la paume,
   divisée par la taille de la main (tendu ≈ 1,5, replié ≈ 0,4). Calculée en 2D et en 3D :

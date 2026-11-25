@@ -27,6 +27,8 @@ from airdesk.log_analysis import (
     Pinch,
     Row,
     block_reason,
+    closing_settings,
+    contact_closing_speeds,
     contact_speeds,
     estimated_latencies,
     latencies,
@@ -38,6 +40,7 @@ from airdesk.log_analysis import (
     press_episodes,
     read_log,
     read_metadata,
+    refused_for_closing,
     rise_splits,
     still_periods,
     summarize,
@@ -547,3 +550,56 @@ def test_rise_splits_count_drag_ruptures_only_before_the_guard():
     rows.append(rise_row(198, 0.6, "actif"))
     splits = rise_splits(rows, 0.15, 0.25, 95)
     assert [(x.release_ms, x.in_drag) for x in splits] == [(66, True)]
+
+
+# --- Vitesse de fermeture (règles F / F3D) -------------------------------------------------------
+
+
+def closing_row(t, state, events=(), closing=None, block="", ratio=0.1):
+    return Row(t, True, ratio, 3, state, list(events), 9.0, entry_block=block,
+               closing_speed=closing)
+
+
+def test_contact_closing_speeds_and_time_since_release():
+    rows = [
+        closing_row(0, "actif", closing=0.2),
+        closing_row(33, "pincement", closing=1.8),  # 1er contact : rien avant
+        closing_row(66, "pincement", ["pressat"]),
+        closing_row(99, "actif", ["releaseat"]),
+        closing_row(132, "actif", closing=-0.3),
+        closing_row(165, "pincement", closing=-0.2),  # 2e tape, 66 ms après le relâchement
+        closing_row(198, "pincement", ["pressat"]),
+        closing_row(231, "glisser"),
+        closing_row(264, "actif", ["release"]),
+    ]
+    found = contact_closing_speeds(rows)
+    assert [(c.contact_ms, c.closing_speed, c.since_release_ms, c.outcome) for c in found] == [
+        (33, 1.8, None, OUTCOME_CLICK), (165, -0.2, 66, OUTCOME_DRAG)]
+
+
+def test_refused_for_closing_gives_duration_and_best_speed():
+    rows = [
+        closing_row(0, "actif", ratio=0.6),
+        closing_row(33, "actif", block="fermeture", closing=0.05),
+        closing_row(66, "actif", block="fermeture", closing=0.12),
+        closing_row(99, "actif", block="fermeture", closing=0.02),
+        closing_row(132, "actif", ratio=0.6),
+    ]
+    pinch = Pinch(33, 132, OUTCOME_NONE, END_RELEASED)
+    refusals = refused_for_closing(rows, [pinch])
+    assert [(r.start_ms, r.duration_ms, r.max_closing_speed) for r in refusals] == [
+        (33, 99, 0.12)]
+    # Un pincement refusé pour une autre raison n'est pas compté.
+    for row in rows:
+        if row.entry_block:
+            row.entry_block = "autres_doigts"
+    assert refused_for_closing(rows, [pinch]) == []
+
+
+def test_closing_settings_from_the_config():
+    settings = closing_settings({"rule": "F", "min_closing_speed": 0.4, "closing_grace_ms": 300})
+    assert settings.active
+    assert settings.min_closing_speed == 0.4
+    old = closing_settings({"rule": "D"})  # log d'avant ces réglages
+    assert not old.active
+    assert old.closing_grace_ms == 0

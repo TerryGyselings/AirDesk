@@ -14,9 +14,11 @@ from __future__ import annotations
 import argparse
 import statistics
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from airdesk.config import load_config
+from airdesk.interpretation.pinch_rules import BLOCK_CLOSING
 from airdesk.log_analysis import (
     IMMOBILE_MIN_MS,
     IMMOBILE_SPEED,
@@ -27,17 +29,21 @@ from airdesk.log_analysis import (
     SLOW_FRAME_MS,
     block_reason,
     click_mode,
+    closing_settings,
+    contact_closing_speeds,
     contact_speeds,
     estimated_latencies,
     frame_interval_ms,
     latencies,
     mean_and_p95,
+    percentile,
     pin_offsets,
     pinch_durations,
     pinch_thresholds,
     press_episodes,
     read_log,
     read_metadata,
+    refused_for_closing,
     release_grace,
     rise_splits,
     still_periods,
@@ -89,6 +95,7 @@ def main() -> None:
         enter, exit_, click_max_ms = pinch_thresholds(metadata)
         grace_ms = release_grace(metadata)
         mode = click_mode(metadata)
+        closing = closing_settings(metadata["config"]["pinch"])
         camera = metadata.get("camera", {})
         git = metadata.get("git", {})
         commit = git.get("commit") or "inconnu"
@@ -108,8 +115,9 @@ def main() -> None:
         enter, exit_, click_max_ms = pinch.enter, pinch.exit, pinch.click_max_ms
         grace_ms = pinch.release_grace_ms
         mode = pinch.click_mode
+        closing = closing_settings(asdict(pinch))
     print(f"Seuils : enter={enter}, exit={exit_}, click_max_ms={click_max_ms}, "
-          f"release_grace_ms={grace_ms:g} | mode de clic : {mode}\n")
+          f"release_grace_ms={grace_ms:g} | mode de clic : {mode} | règle {closing.rule}\n")
 
     s = summarize(rows)
     print(f"Images : {s.frames} en {s.duration_s:.2f} s, soit {s.fps_mean:.1f} images/s en moyenne")
@@ -139,8 +147,10 @@ def main() -> None:
         if row.entry_block:
             has_entry_block = True
             break
+    contacts = contact_closing_speeds(rows)
     if pinches:
-        print(f"{'début (ms)':>10} | {'durée':>7} | {'issue observée':<14} | {'fin':<11} | seuil")
+        print(f"{'début (ms)':>10} | {'durée':>7} | {'issue observée':<14} | {'fin':<11} | seuil"
+              " | fermeture au contact")
     durations = []
     for p in pinches:
         durations.append(p.duration_ms)
@@ -151,7 +161,7 @@ def main() -> None:
             expected = "-"
         print(
             f"{p.start_ms:>10} | {p.duration_ms:>4} ms | {p.outcome:<14} | {p.ended_by:<11} | "
-            f"{expected}"
+            f"{expected:<5} | {contact_cell(contacts, p)}"
         )
         if p.outcome == OUTCOME_NONE:
             # Pourquoi aucun clic ni glisser : raison de refus la plus fréquente pendant ce
@@ -160,6 +170,10 @@ def main() -> None:
             if blocked is not None:
                 reason, count, total = blocked
                 print(f"{'':>10}   -> refusé : {reason} ({count}/{total} images)")
+                if reason == BLOCK_CLOSING:
+                    best = max_closing_speed(rows, p.start_ms, p.end_ms)
+                    print(f"{'':>10}      vitesse de fermeture max {fmt(best)} pendant "
+                          f"{p.duration_ms} ms (seuil {closing.min_closing_speed:g})")
             elif not has_entry_block:
                 print(f"{'':>10}   -> raison inconnue (colonne entry_block absente de ce log)")
 
@@ -169,6 +183,7 @@ def main() -> None:
         print_press_episodes(rows)
     print_contact_speeds(rows, args.contact_speed)
     print_pin_offsets(rows)
+    print_closing_summary(rows, pinches, contacts, closing)
     print_rise_replay(rows, enter, args.rise_guard_px)
 
     print("\nDurée des pincements :")
@@ -187,6 +202,71 @@ def main() -> None:
 # dans les logs du 2026-11-24 et 25 : 570 à 700 px par taille de main).
 RISE_VALUES = (0.12, 0.15, 0.18)
 RISE_GUARD_PX = 95.0
+
+
+def fmt(value) -> str:
+    return "inconnue" if value is None else f"{value:.2f}"
+
+
+def contact_cell(contacts, pinch) -> str:
+    """Vitesse de fermeture au contact accepté pendant ce pincement (vide si refusé)."""
+    for c in contacts:
+        if pinch.start_ms <= c.contact_ms <= pinch.end_ms:
+            return fmt(c.closing_speed)
+    return ""
+
+
+def max_closing_speed(rows, start_ms, end_ms):
+    """Plus haute vitesse de fermeture pendant un pincement refusé (sa meilleure chance)."""
+    best = None
+    for row in rows:
+        if start_ms <= row.timestamp_ms <= end_ms and row.closing_speed is not None:
+            if best is None or row.closing_speed > best:
+                best = row.closing_speed
+    return best
+
+
+def print_closing_summary(rows, pinches, contacts, closing) -> None:
+    """Règles F / F3D : marge réelle entre les vitesses de fermeture des contacts acceptés et
+    min_closing_speed ; refus « fermeture » ; contacts exemptés (juste après un relâchement).
+    Pour un log enregistré en règle D, montre ce que F aurait refusé."""
+    speeds = []
+    for c in contacts:
+        if c.closing_speed is not None:
+            speeds.append(c.closing_speed)
+    if not speeds:
+        return
+    refusals = refused_for_closing(rows, pinches)
+    note = ""
+    if not closing.active:
+        # Log enregistré sans condition de fermeture : on compare aux réglages ACTUELS, pour
+        # voir ce que F aurait fait de ces contacts.
+        closing = closing_settings(asdict(load_config().pinch))
+        note = " ; log sans règle F : comparaison avec les réglages actuels"
+    threshold = closing.min_closing_speed
+    print(f"Vitesse de fermeture (règle {closing.rule}, min_closing_speed {threshold:g}, "
+          f"closing_grace_ms {closing.closing_grace_ms:g}{note}) :")
+    print(f"  {len(contacts)} contact(s) accepté(s), {len(refusals)} refus « fermeture »")
+    print(f"  au contact des acceptés : min {min(speeds):.2f}, P5 {percentile(speeds, 5):.2f}, "
+          f"médiane {statistics.median(speeds):.2f}, max {max(speeds):.2f}")
+    exempted = []
+    below = []
+    for c in contacts:
+        if c.closing_speed is not None and c.closing_speed >= threshold:
+            continue
+        label = f"{c.contact_ms} ({fmt(c.closing_speed)}"
+        if c.since_release_ms is not None:
+            label += f", {c.since_release_ms} ms après un relâchement"
+        label += ")"
+        if c.since_release_ms is not None and c.since_release_ms <= closing.closing_grace_ms:
+            exempted.append(label)
+        else:
+            below.append(label)
+    if exempted:
+        print(f"  sous le seuil, exemptés (2e tape) : {len(exempted)} : " + " ; ".join(exempted))
+    if below:
+        what = "acceptés hors exemption" if not note else "que F aurait refusés"
+        print(f"  sous le seuil, {what} : {len(below)} : " + " ; ".join(below))
 
 
 def print_pin_offsets(rows) -> None:

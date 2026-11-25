@@ -137,6 +137,7 @@ class GestureStateMachine:
             min_closing_speed=pinch.min_closing_speed,
             min_closing_speed_3d=pinch.min_closing_speed_3d,
             max_contact_speed=pinch.max_contact_speed,
+            closing_grace_ms=pinch.closing_grace_ms,
         )
         self._pinch_detector = PinchHysteresis(
             pinch.rule, thresholds, pinch.exit, pinch.release_grace_ms, pinch.exit_on_fold,

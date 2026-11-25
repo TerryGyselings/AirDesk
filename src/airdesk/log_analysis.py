@@ -12,6 +12,8 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
+from airdesk.interpretation.pinch_rules import BLOCK_CLOSING
+
 # percentile est utilisé ici et reste importable depuis ce module (scripts, gesture_analysis).
 from airdesk.stats import percentile
 
@@ -36,6 +38,7 @@ class Row:
     anchor_distance: float | None = None  # mode press : distance au point de contact
     pin_kind: str = ""  # clic épinglé : press, press_snap, release, release_snap
     pin_offset_px: float | None = None  # écart main -> point épinglé (px)
+    closing_speed: float | None = None  # vitesse de fermeture des doigts (règles F / F3D)
 
 
 def optional_float(record: dict, name: str) -> float | None:
@@ -83,6 +86,7 @@ def read_log(path: Path) -> list[Row]:
                     anchor_distance=optional_float(record, "anchor_distance"),
                     pin_kind=record.get("pin_kind") or "",
                     pin_offset_px=optional_float(record, "pin_offset_px"),
+                    closing_speed=optional_float(record, "closing_speed"),
                 )
             )
     return rows
@@ -229,6 +233,25 @@ def pinch_thresholds(metadata: dict) -> tuple[float, float, float]:
     """(enter, exit, click_max_ms) en vigueur pendant la session enregistrée."""
     pinch = metadata["config"]["pinch"]
     return pinch["enter"], pinch["exit"], pinch["click_max_ms"]
+
+
+@dataclass(frozen=True)
+class ClosingSettings:
+    """Réglages de la condition de fermeture (règles F / F3D) pendant la session."""
+
+    rule: str
+    min_closing_speed: float
+    closing_grace_ms: float
+
+    @property
+    def active(self) -> bool:
+        return self.rule in ("F", "F3D")
+
+
+def closing_settings(pinch: dict) -> ClosingSettings:
+    """D'après la section `pinch` de la config (0 pour les logs d'avant ces réglages)."""
+    return ClosingSettings(pinch.get("rule", "A"), pinch.get("min_closing_speed", 0.0),
+                           pinch.get("closing_grace_ms", 0.0))
 
 
 def has_press(events: list[str]) -> bool:
@@ -720,4 +743,76 @@ def _rise_splits_in_episode(episode, rise, enter, guard_px) -> list[RiseSplit]:
             minimum = row.pinch_ratio
         if not moved and row.pinch_ratio >= minimum + rise and row.pinch_ratio >= enter:
             released_at = row.timestamp_ms
+    return found
+
+
+# --- Vitesse de fermeture des doigts (règles F / F3D) ----------------------------------------
+
+
+@dataclass
+class ContactClosing:
+    """Un contact accepté (la machine passe de « actif » à « pincement »)."""
+
+    contact_ms: int
+    closing_speed: float | None  # à l'image du contact (None : historique trop court)
+    since_release_ms: int | None  # temps depuis le dernier relâchement (None : aucun avant)
+    outcome: str  # OUTCOME_CLICK, OUTCOME_DRAG ou OUTCOME_NONE (Press jamais confirmé)
+
+
+def contact_closing_speeds(rows: list[Row]) -> list[ContactClosing]:
+    """Vitesse de fermeture au contact de chaque pincement accepté, et temps écoulé depuis le
+    relâchement précédent : un contact juste après un relâchement (2e tape d'un double-clic)
+    est exempté de la condition de fermeture (closing_grace_ms)."""
+    found = []
+    last_release_ms = None
+    for i in range(len(rows)):
+        row = rows[i]
+        if i > 0 and row.state == "pincement" and rows[i - 1].state == "actif":
+            since = None
+            if last_release_ms is not None:
+                since = row.timestamp_ms - last_release_ms
+            found.append(ContactClosing(row.timestamp_ms, row.closing_speed, since,
+                                        outcome_after(rows, i)))
+        if has_release(row.events) or "click" in row.events:
+            last_release_ms = row.timestamp_ms
+    return found
+
+
+def outcome_after(rows: list[Row], start: int) -> str:
+    """Issue d'un appui qui commence à la ligne `start` : glisser si la machine passe à l'état
+    « glisser », clic si un Click ou un Release arrive avant, sinon aucune."""
+    for later in rows[start:]:
+        if later.state == "glisser":
+            return OUTCOME_DRAG
+        if "click" in later.events or has_release(later.events):
+            return OUTCOME_CLICK
+        if later.state != "pincement":
+            break
+    return OUTCOME_NONE
+
+
+@dataclass
+class ClosingRefusal:
+    """Un pincement (vu dans pinch_ratio) refusé pour « fermeture » : doigts trop lents."""
+
+    start_ms: int
+    duration_ms: int
+    max_closing_speed: float | None  # la plus haute pendant le pincement (meilleure chance)
+
+
+def refused_for_closing(rows: list[Row], pinches: list[Pinch]) -> list[ClosingRefusal]:
+    """Pincements sans issue dont la raison de refus la plus fréquente est « fermeture »."""
+    found = []
+    for p in pinches:
+        if p.outcome != OUTCOME_NONE:
+            continue
+        blocked = block_reason(rows, p.start_ms, p.end_ms)
+        if blocked is None or blocked[0] != BLOCK_CLOSING:
+            continue
+        best = None
+        for row in rows:
+            if p.start_ms <= row.timestamp_ms <= p.end_ms and row.closing_speed is not None:
+                if best is None or row.closing_speed > best:
+                    best = row.closing_speed
+        found.append(ClosingRefusal(p.start_ms, p.duration_ms, best))
     return found

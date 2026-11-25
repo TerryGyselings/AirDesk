@@ -458,3 +458,100 @@ n'est coupé, et il n'y a plus d'à-coup du curseur après un clic.
   562 ms chacun) et un à 58 203 ms (360 ms). Hypothèse : le geste « OK » (autres doigts
   ouverts) n'est pas toujours respecté, surtout en début de session. Si ça persiste,
   comparer les extensions des doigts de ces pincements avec `folded_below` (0,87).
+
+## 2026-11-25 — Analyse v4 : règle F à l'essai
+
+Sessions v4 du protocole d'enregistrement (17-13-15 / 17-16-37), analysées avec
+analyse_gestures.py.
+
+- **Le cas « gauche » n'est pas reproduit à l'enregistrement** : `va_et_vient_gauche` ne
+  passe jamais sous enter, `main_repos_profil_gauche` 1 fois. On ne peut pas trancher sur
+  ces séquences : le faux clic à gauche reste observé seulement en usage réel.
+- **La main au repos de profil, au centre, est bien reproduite** (pouce réellement posé,
+  pinch_ratio médian 0,16) : D laisse 1 faux glisser par session.
+- **closing_speed au contact** : vrais pincements 3,36 (centre) / 1,01 (gauche) contre 0,09
+  (repos de profil) ; J = 1,00, marge +0,54, seuil proposé 0,39. **Limite : n = 11 / 4
+  seulement**, à confirmer en usage.
+- palm_facing, palm_width et wrist_y refuseraient de vrais clics à gauche ou en bas :
+  **écartés**.
+
+**Décision : règle F à l'essai** (`rule: F`, `min_closing_speed: 0.4`), repli documenté
+`rule: D`.
+
+**Problème trouvé avant activation : le double-clic.** Rejoué sur les logs réels, F à 0,4
+aurait gêné 14 contacts (19-12-46 : 4, 19-28-35 : 6, 17-10-10 : 4). **Tous sont des 2es
+tapes**, 31 à 125 ms après un relâchement, dont les 4 doubles-clics aimantés validés le même
+jour (vitesses -0,26 / -0,33 / -0,15 / 0,21). La vitesse est mesurée sur 200 ms : à la 2e
+tape, elle remonte jusqu'au creux de la 1re, elle est donc faible ou négative. Rejoué dans la
+machine, F sans exemption refuse la 2e tape (19 578 ms), ou ne l'accepte que 94 à 141 ms plus
+tard, presque au relâchement (25 000, 29 735, 38 266 ms).
+- **Exemption `closing_grace_ms: 300`** : pas de condition de fermeture pour un contact moins
+  de 300 ms après la fin du pincement précédent. Le faux pincement visé (pouce posé, main de
+  profil) ne suit pas un relâchement récent. 300 ms couvre les 14 cas (max 125 ms) et reste
+  sous le délai de double-clic (500 ms). Rejoué : les 4 doubles-clics du 17-10-10 donnent 2
+  Press chacun.
+- **Marge réelle** (analyse_log.py, tous les logs avec closing_speed, 157 premiers contacts
+  hors 2es tapes) : minimum 0,53, P5 0,79, médiane 1,65 ; aucun sous 0,5. Le seuil de 0,4
+  garde donc au moins +0,13.
+- **Cas limite** : log 16-35-12 à 9 484 ms, la main réapparaît déjà pincée après 170 ms de
+  perte. closing_speed est inconnue (moins de 200 ms d'historique) et F refuse, alors que
+  c'était le début d'un glisser. Accepté pour l'essai (sans historique, on ne sait pas si
+  les doigts se ferment) ; à surveiller.
+
+**Analyse corrigée** :
+- `gesture_analysis.detects` ne passait pas closing_speed à la règle : F refusait toutes les
+  images.
+- Même corrigé, un pincement *maintenu* a une vitesse d'environ 0, et l'entrée a lieu avant
+  la fenêtre mesurée (1re seconde ignorée). Le rappel image par image de F / F3D est donc
+  affiché « non mesurable » ; leur rappel se lit dans les épisodes de `pincements_repetes`
+  (F 8/10 comme D en entraînement ; 8/10 contre 9/10 en test).
+- Faux pincements image par image en main de profil au centre : 21/240 avec F contre 40/240
+  avec D (entraînement), 9/240 contre 24/240 (test).
+- analyse_log.py affiche la vitesse de fermeture au contact de chaque pincement accepté, la
+  vitesse max et la durée de chaque refus « fermeture », une synthèse (acceptés, refus,
+  distribution, contacts exemptés). Sur un log enregistré en D, il compare aux réglages
+  actuels.
+
+## 2026-11-25 — Essai F (log 17-41-02) et folded_below 0,65
+
+Essai réel de la règle F (log 17-41-02) : **0 refus « fermeture »**, 8 doubles-clics
+aimantés, tremblement médian 1,57 px. Restent **7 refus « autres_doigts »** (19 327, 68 921,
+102 531, 102 875, 103 984, 104 375, 107 875 ms), dont des doubles-clics à gauche refusés par
+paires. Main tournée vers la gauche, les autres doigts paraissent raccourcis à l'image.
+
+ext_autres_max (max de majeur, annulaire, auriculaire) sur ces refus, au contact / max :
+
+| refus (ms) | 2D contact | 2D max | 3D contact | 3D max |
+|---|---|---|---|---|
+| 19 327 | 0,85 | 0,86 | 0,88 | 0,88 |
+| 68 921 | 0,87 | 0,87 | 0,89 | 0,90 |
+| 102 531 | 0,83 | 0,83 | 0,85 | 0,85 |
+| 102 875 | 0,82 | 0,84 | 0,84 | 0,85 |
+| 103 984 | 0,83 | 0,83 | 0,85 | 0,85 |
+| 104 375 | 0,81 | 0,84 | 0,83 | 0,86 |
+| 107 875 | 0,75 | 0,75 | 0,80 | 0,80 |
+
+Tous juste sous `folded_below` 0,87. En règle F, la vitesse de fermeture écarte déjà la main
+au repos de profil : ce seuil ne sert plus qu'à rejeter le poing.
+
+Rejeu de F sur les sessions v4 (délai 66 ms, marges, fermeture 0,4) selon folded_below :
+- poing (ext_autres_max 2D) : P95 0,40 / 0,49, max 0,56 en session 2 (0,90 sur une image
+  isolée en session 1) ; **0 faux épisode de poing jusqu'à 0,55**, poing_ouvre_ferme en
+  donne 1 à 0,50 ;
+- pincements répétés à gauche (session 2) : 6/10 à 0,87, 7/10 à 0,80-0,75, **8/10 à
+  0,70-0,65**, 9/10 à 0,60-0,55 ; au centre 10/10 partout ;
+- coût, le même de 0,80 à 0,55 : parasites 3 → 5 (s1) et 5 → 7 (s2), main de profil au centre
+  1 → 2 (s2).
+- Les 7 refus réels rejoués en F : 6/7 acceptés à 0,80-0,75, **7/7 dès 0,70** (vitesses au
+  contact 0,59 à 1,96).
+- Refus « autres_doigts » de tous les logs réels : la plupart entre 0,75 et 0,87 (sans doute
+  de vrais essais), quatre à 0,36-0,57 (sans doute des poings), un à 0,66.
+
+**Décision : `folded_below: 0.65`** (au lieu de 0,87). Il tombe dans le creux entre les poings
+probables (≤ 0,57) et les vrais essais (≥ 0,66), avec une marge de +0,09 sur le max du poing
+v4. `folded_below_3d` reste à 0,91 (règles 3D, pas en service). **Revenir à `rule: D` impose
+de remettre 0,87** : D compte sur ce seuil contre la main de profil.
+
+Tests : le clic à gauche de 102 531 ms est refusé à 0,87 et accepté à 0,65 (règle F) ; un
+poing qui se ferme vite (autres doigts à 0,45) reste refusé à 0,65 (et serait accepté à
+0,40).

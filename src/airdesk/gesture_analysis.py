@@ -336,8 +336,10 @@ def stats_by_label(samples: list[Sample]) -> dict[str, dict[str, Stats | None]]:
 
 
 def detects(rule: str, s: Sample, thresholds: RuleThresholds) -> bool:
+    """La règle accepte-t-elle cette image ? Avec la vitesse de fermeture (règles F / F3D) :
+    sans elle, F refusait toutes les images."""
     return pinch_candidate(rule, s.pinch_ratio, s.extensions, s.extensions_3d, thresholds,
-                           s.palm_width)
+                           s.palm_width, s.closing_speed, s.closing_speed_3d)
 
 
 @dataclass

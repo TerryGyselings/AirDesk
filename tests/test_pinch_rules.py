@@ -15,6 +15,7 @@ from airdesk.interpretation.pinch_rules import (
     entry_block_reason,
     pinch_candidate,
     pinch_measure,
+    rule_has_entry_condition,
 )
 
 T = RuleThresholds(enter=0.25, min_index_extension=1.0, folded_below=0.8,
@@ -376,3 +377,70 @@ def test_re_pinch_after_a_rise_release_needs_enter():
     h = PinchHysteresis("A", T, exit=0.40, release_rise=0.15)
     assert run_rise(h, [0.10, 0.30, 0.27, 0.26, 0.20]) == [("start", 0), ("end", 33),
                                                           ("start", 132)]
+
+
+# --- Règle F : exemption de fermeture juste après un relâchement ---------------------------------
+
+F_SEUILS = RuleThresholds(enter=0.25, folded_below=0.8, min_closing_speed=0.4,
+                          closing_grace_ms=300)
+
+
+def run_f(hysteresis, frames):
+    """frames : liste de (t_ms, pinch_ratio, closing_speed)."""
+    events = []
+    for t, value, closing in frames:
+        event = hysteresis.update(t, value, TENDUS, TENDUS, closing_speed=closing)
+        if event is not None:
+            events.append((event, t))
+    return events
+
+
+def test_rule_f_refuses_a_slow_first_contact():
+    """Pouce qui se pose sans fermeture (main au repos de profil) : refusé."""
+    h = PinchHysteresis("F", F_SEUILS, exit=0.40)
+    assert run_f(h, [(0, 0.16, 0.09), (33, 0.16, 0.05)]) == []
+    assert h.last_block == BLOCK_CLOSING
+
+
+def test_rule_f_accepts_a_second_tap_right_after_a_release():
+    """2e tape d'un double-clic 64 ms après le relâchement : vitesse négative, mais exemptée."""
+    h = PinchHysteresis("F", F_SEUILS, exit=0.40)
+    frames = [(0, 0.10, 2.0), (33, 0.50, -1.0), (97, 0.20, -0.3)]
+    assert run_f(h, frames) == [("start", 0), ("end", 33), ("start", 97)]
+
+
+def test_rule_f_grace_ends_after_closing_grace_ms():
+    h = PinchHysteresis("F", F_SEUILS, exit=0.40)
+    frames = [(0, 0.10, 2.0), (33, 0.50, -1.0), (400, 0.20, 0.1)]  # 367 ms > 300
+    assert run_f(h, frames) == [("start", 0), ("end", 33)]
+
+
+def test_rule_f_without_grace():
+    seuils = RuleThresholds(enter=0.25, folded_below=0.8, min_closing_speed=0.4)
+    h = PinchHysteresis("F", seuils, exit=0.40)
+    frames = [(0, 0.10, 2.0), (33, 0.50, -1.0), (97, 0.20, -0.3)]
+    assert run_f(h, frames) == [("start", 0), ("end", 33)]
+
+
+def test_reset_forgets_the_last_release():
+    """Retour en veille : pas d'exemption pour le premier contact suivant."""
+    h = PinchHysteresis("F", F_SEUILS, exit=0.40)
+    run_f(h, [(0, 0.10, 2.0), (33, 0.50, -1.0)])
+    h.reset()
+    assert run_f(h, [(97, 0.20, -0.3)]) == []
+
+
+def test_grace_does_not_skip_the_other_conditions():
+    """L'exemption ne porte que sur la fermeture : un poing reste refusé (règle D)."""
+    h = PinchHysteresis("F", F_SEUILS, exit=0.40)
+    run_f(h, [(0, 0.10, 2.0), (33, 0.50, -1.0)])
+    assert h.update(97, 0.20, POING, POING, closing_speed=-0.3) is None
+    assert h.last_block == BLOCK_OTHER_FINGERS
+
+
+def test_rules_with_an_entry_condition():
+    assert rule_has_entry_condition("F")
+    assert rule_has_entry_condition("F3D")
+    assert not rule_has_entry_condition("D")
+    with pytest.raises(ValueError):
+        rule_has_entry_condition("Z")

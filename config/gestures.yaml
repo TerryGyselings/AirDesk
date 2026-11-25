@@ -58,7 +58,13 @@ pinch:
   # Choix du 2026-11-24 (2 sessions de P01, voir docs/journal.md) : D, ratio, délai 66 ms,
   # sans sortie sur repli. Mettre « rule: A » et « release_grace_ms: 0 » pour revenir au
   # comportement d'origine et comparer.
-  rule: D
+  # F = D + doigts qui se FERMENT au contact (closing_speed >= min_closing_speed) ; F3D = idem
+  # en 3D. ESSAI du 2026-11-25 (analyse v4, sessions 17-13-15 / 17-16-37) : main au repos de
+  # profil au centre (pouce posé, pinch_ratio médian 0,16) = 1 faux glisser par session avec
+  # D. Vitesse de fermeture au contact : vrais pincements 3,36 (centre) / 1,01 (gauche)
+  # contre 0,09 (repos de profil), J = 1,00, marge +0,54. ATTENTION : n = 11 / 4 seulement.
+  # REPLI : « rule: D » (choix validé du 2026-11-24).
+  rule: F
   # Extension minimale de l'index (règles B, C). Appris sur l'entraînement, non utilisé par D.
   min_index_extension: 0.80
   min_index_extension_3d: 0.86
@@ -93,10 +99,17 @@ pinch:
   # clics rapides séparés, latence 34 ms. scripts/analyse_log.py affiche le rejeu de chaque
   # log. 0 = désactivé.
   release_rise: 0.15
-  # Règles candidates F / F3D (vitesse de fermeture des doigts) : pas encore branchées,
-  # à régler avec la session v4 (scripts/analyse_gestures.py).
-  min_closing_speed: 0.0
+  # Règles F / F3D : vitesse de fermeture minimale au contact (baisse de pinch_ratio par
+  # seconde, sur 200 ms). Essai : 0,4 (seuil proposé par l'analyse v4 : 0,39 ; n faible).
+  min_closing_speed: 0.4
   min_closing_speed_3d: 0.0
+  # Règles F / F3D : pas de condition de fermeture pour un contact moins de ce temps (ms)
+  # après la fin du pincement précédent. 2e tape d'un double-clic : la vitesse sur 200 ms
+  # remonte jusqu'au creux de la 1re tape, elle est faible ou négative. Sans exemption, F à
+  # 0,4 aurait refusé 14 contacts réels (logs 19-12-46, 19-28-35, 17-10-10), tous 31 à 125 ms
+  # après un relâchement, dont les 4 doubles-clics du 17-10-10. 300 ms les couvre et reste
+  # sous le délai de double-clic (500 ms). 0 = pas d'exemption.
+  closing_grace_ms: 300
   # Mesure comparée à enter / exit : ratio (pouce -> bout de l'index), seg78 / seg68
   # (pouce -> segment 7-8 ou 6-8 de l'index). enter / exit doivent être réglés pour elle.
   measure: ratio
@@ -146,9 +159,16 @@ quality:
 
 fingers:
   # Extension sous laquelle un doigt est compté comme replié (bout -> centre de paume /
-  # taille de main). Appris sur l'entraînement (scripts/analyse_gestures.py) : séparation
-  # poing / pincement de « ext_autres_max », marge +0,26 (3D : +0,22).
-  folded_below: 0.87
+  # taille de main). Règle D / F : il faut au moins un autre doigt (majeur, annulaire,
+  # auriculaire) au-dessus de ce seuil, sinon c'est un poing.
+  # 2026-11-25 : 0,87 -> 0,65. En règle F, la vitesse de fermeture écarte déjà la main au
+  # repos de profil : ce seuil ne sert plus qu'au poing. Main tournée vers la gauche = autres
+  # doigts raccourcis à l'image : 7 vrais clics refusés dans le log 17-41-02
+  # (ext_autres_max 0,75-0,87). Sessions v4 : poing P95 0,40 / 0,49, max 0,56 ; 0 faux
+  # épisode de poing jusqu'à 0,55 ; pincements répétés à gauche 6/10 -> 8/10.
+  # En revenant à « rule: D », remettre 0,87 (D compte sur ce seuil contre la main de profil).
+  folded_below: 0.65
+  # Seuil 3D : utilisé seulement par les règles B3D / C3D / D3D / F3D (pas en service).
   folded_below_3d: 0.91
 
 pointer:

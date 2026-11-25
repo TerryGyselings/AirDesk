@@ -76,6 +76,9 @@ class PinchConfig:
     # Relâchement relatif : remontée de la mesure au-dessus de son minimum pendant l'appui,
     # pendant un appui sur place seulement. 0 = désactivé.
     release_rise: float = 0.0
+    # Règles F / F3D : pas de condition de fermeture pour un contact moins de ce temps (ms)
+    # après la fin du pincement précédent (2e tape d'un double-clic). 0 = pas d'exemption.
+    closing_grace_ms: float = 0.0
     # Règles F / F3D (non branchées) : vitesse de fermeture minimale des doigts.
     min_closing_speed: float = 0.0
     min_closing_speed_3d: float = 0.0

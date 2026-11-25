@@ -40,6 +40,7 @@ from airdesk.gesture_analysis import (
     count_sequences,
     describe,
     detection_rate,
+    detects,
     entry_details,
     entry_moments,
     entry_separations,
@@ -760,3 +761,16 @@ def test_wrist_speed_is_read_from_the_dataset(tmp_path):
     samples = read_dataset(path)
     assert samples[0].wrist_speed == 2.4
     assert samples[1].wrist_speed is None
+
+
+# --- Règle F image par image ---------------------------------------------------------------------
+
+
+def test_detects_uses_the_closing_speed():
+    """Sans la vitesse de fermeture, F refusait toutes les images (rappel affiché 0 %)."""
+    f = replace(T, min_closing_speed=0.4)
+    s = Sample("pincements_repetes", 0, 0.1, OPEN_OTHERS, OPEN_OTHERS, 0.2)
+    s.closing_speed = 2.0  # doigts qui se ferment : contact volontaire
+    assert detects("F", s, f)
+    s.closing_speed = 0.0  # pincement maintenu : doigts immobiles
+    assert not detects("F", s, f)
