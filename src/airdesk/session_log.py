@@ -66,6 +66,11 @@ COLUMNS = (
         "closing_speed_3d",  # idem sur pinch_ratio_3d
         "entry_block",  # pourquoi un pincement ne peut pas commencer (vide : il le peut)
         "tracker_hands",  # nombre de mains demandé à MediaPipe pour l'image (1 ou 2)
+        # Instant du contact des doigts (entrée en pincement), rempli seulement sur l'image où
+        # le premier Press / Click de ce pincement est émis : latence = timestamp - contact.
+        "contact_ms",
+        # Mode press : distance de la main au point de contact (tailles de main) pendant l'appui
+        "anchor_distance",
     ]
 )
 
@@ -203,6 +208,8 @@ class SessionLog:
         closing_speed_3d: float | None = None,
         entry_block: str = "",
         tracker_hands: int | None = None,
+        contact_ms: float | None = None,
+        anchor_distance: float | None = None,
     ) -> None:
         """Une ligne par image. `features` vaut None quand aucune main n'est visible.
 
@@ -228,6 +235,8 @@ class SessionLog:
         row.append(optional(closing_speed_3d, 3))
         row.append(entry_block)
         row.append("" if tracker_hands is None else tracker_hands)
+        row.append("" if contact_ms is None else int(contact_ms))
+        row.append(optional(anchor_distance, 3))
         self._writer.writerow(row)
 
     def __exit__(self, *exc) -> None:

@@ -542,3 +542,159 @@ def test_closing_speed_is_computed_by_the_machine():
     assert m.closing_speed == pytest.approx(2.0)
     m.update(t + 233, None, None)  # main perdue : historique effacé
     assert m.closing_speed is None
+
+
+# --- Mode de clic « press » (comme une souris) -------------------------------------------------
+# hand_size = 0,2 dans features() : drag_threshold 0,15 = 0,03 en coordonnées image.
+
+
+def machine_press(drag_catchup_ms=100, release_grace_ms=0, min_press_frames=2):
+    engagement = EngagementConfig(hold_ms=300, lost_timeout_ms=1000, rest_ms=500)
+    pinch = PinchConfig(click_mode="press", min_press_frames=min_press_frames,
+                        drag_threshold=0.15, drag_catchup_ms=drag_catchup_ms,
+                        release_grace_ms=release_grace_ms)
+    return GestureStateMachine(engagement, pinch, pointer=PointerConfig(mode="absolute"))
+
+
+def activate_press(m):
+    """Activation, puis une image main ouverte : le curseur est déjà sur la main (P)."""
+    t = activate(m)
+    m.update(t, OPEN, P)
+    return t + 33
+
+
+def moves(events):
+    found = []
+    for event in events:
+        if isinstance(event, MoveTo):
+            found.append(event)
+    return found
+
+
+def test_press_comes_one_frame_after_the_contact():
+    """Latence : Press dès la 2e image de pincement (min_press_frames = 2), pas au relâchement."""
+    m = machine_press()
+    t = activate_press(m)
+    assert m.update(t, PINCH, P) == []  # contact : 1re image, pas encore confirmé
+    assert m.state == State.PINCHING
+    assert m.update(t + 33, PINCH, P) == [Press()]
+    assert m.event_contact_ms == t  # pour la colonne contact_ms du log
+    assert m.update(t + 66, PINCH, P) == []
+    assert m.event_contact_ms is None  # seulement sur l'image du Press
+
+
+def test_click_in_place_is_press_then_release_with_a_frozen_cursor():
+    m = machine_press()
+    t = activate_press(m)
+    events = m.update(t, PINCH, (0.50, 0.50))
+    events += m.update(t + 33, PINCH, (0.51, 0.50))  # petits tremblements : 0,05 taille de main
+    events += m.update(t + 66, PINCH, (0.50, 0.51))
+    events += m.update(t + 600, PINCH, (0.51, 0.51))  # appui long sans bouger : pas de glisser
+    events += m.update(t + 633, OPEN, (0.51, 0.51))
+    assert events == [Press(), Release()]  # aucun MoveTo : le curseur est resté figé
+    assert m.state == State.ACTIVE
+
+
+def test_click_max_ms_is_not_used_in_press_mode():
+    m = machine_press()
+    t = activate_press(m)
+    m.update(t, PINCH, P)
+    m.update(t + 2000, PINCH, P)
+    assert m.state == State.PINCHING  # 2 s sans bouger : toujours un appui sur place
+
+
+def test_drag_starts_beyond_the_threshold_and_catches_up():
+    m = machine_press(drag_catchup_ms=100)
+    t = activate_press(m)
+    m.update(t, PINCH, (0.50, 0.50))
+    m.update(t + 33, PINCH, (0.50, 0.50))  # Press
+    assert m.update(t + 66, PINCH, (0.52, 0.50)) == []  # 0,10 taille de main : figé
+    assert m.state == State.PINCHING
+    assert m.update(t + 99, PINCH, (0.60, 0.50)) == []  # 0,5 taille de main : glisser
+    assert m.state == State.DRAGGING
+    assert m.anchor_distance == pytest.approx(0.5)
+    hand_u = (0.60 - 0.15) / 0.70
+    # Rattrapage : à 33 ms sur 100, le curseur a fait 33 % du chemin.
+    first = moves(m.update(t + 132, PINCH, (0.60, 0.50)))[0]
+    assert first.u == pytest.approx(0.5 + 0.33 * (hand_u - 0.5))
+    middle = moves(m.update(t + 165, PINCH, (0.60, 0.50)))[0]
+    assert first.u < middle.u < hand_u
+    last = moves(m.update(t + 199, PINCH, (0.60, 0.50)))[0]  # 100 ms : il a rejoint la main
+    assert last.u == pytest.approx(hand_u)
+    events = m.update(t + 232, OPEN, (0.60, 0.50))
+    assert Release() in events
+
+
+def test_drag_without_catch_up_jumps_to_the_hand():
+    m = machine_press(drag_catchup_ms=0)
+    t = activate_press(m)
+    m.update(t, PINCH, (0.50, 0.50))
+    m.update(t + 33, PINCH, (0.50, 0.50))
+    m.update(t + 66, PINCH, (0.60, 0.50))
+    first = moves(m.update(t + 99, PINCH, (0.60, 0.50)))[0]
+    assert first.u == pytest.approx((0.60 - 0.15) / 0.70)
+
+
+def test_double_click_is_two_press_release_at_the_same_place():
+    m = machine_press()
+    t = activate_press(m)
+    events = []
+    for start in (t, t + 200):
+        events += m.update(start, PINCH, P)
+        events += m.update(start + 33, PINCH, P)
+        events += m.update(start + 66, OPEN, P)
+    events += m.update(t + 300, OPEN, P)
+    assert events == [Press(), Release(), Press(), Release()]
+
+
+def test_one_frame_glitch_produces_nothing():
+    m = machine_press()
+    t = activate_press(m)
+    events = m.update(t, PINCH, P)
+    events += m.update(t + 33, OPEN, P)
+    events += m.update(t + 66, OPEN, P)
+    assert events == []
+    assert m.state == State.ACTIVE
+
+
+def test_no_press_while_the_release_is_being_confirmed():
+    """Contact d'une image, puis relâchement en cours de confirmation : pas un appui."""
+    m = machine_press(release_grace_ms=66)
+    t = activate_press(m)
+    events = m.update(t, PINCH, P)
+    events += m.update(t + 33, OPEN, P)  # relâchement commencé
+    events += m.update(t + 66, OPEN, P)
+    events += m.update(t + 99, OPEN, P)  # relâchement confirmé
+    assert events == []
+
+
+def test_lost_hand_releases_a_pressed_button():
+    m = machine_press()
+    t = activate_press(m)
+    m.update(t, PINCH, P)
+    m.update(t + 33, PINCH, P)
+    m.update(t + 66, None, None)
+    assert m.update(t + 1200, None, None) == [Release()]
+    assert m.state == State.IDLE
+
+
+def test_lowered_hand_releases_a_pressed_button():
+    m = machine_press()
+    t = activate_press(m)
+    m.update(t, PINCH, P)
+    m.update(t + 33, PINCH, P)
+    events = []
+    for dt in range(66, 700, 33):
+        events += m.update(t + dt, PINCH, (0.50, 0.90))  # main baissée sous la zone
+    assert Release() in events
+    assert m.state == State.IDLE
+
+
+def test_release_mode_logs_the_contact_on_the_click():
+    m = machine_zone()
+    t = activate_at(m, IN)
+    m.update(t, PINCH, IN)
+    events = m.update(t + 33, OPEN, IN)
+    assert events == [Click()]
+    assert m.event_contact_ms == t
+

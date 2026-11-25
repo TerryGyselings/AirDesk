@@ -4,7 +4,12 @@ import pytest
 
 from airdesk.config import EngagementConfig, PinchConfig, PointerConfig
 from airdesk.interpretation.features import HandFeatures
-from airdesk.interpretation.hand_selection import HandCandidate, HandSelector, Selection
+from airdesk.interpretation.hand_selection import (
+    HandCandidate,
+    HandSelector,
+    Selection,
+    TrackerModePolicy,
+)
 from airdesk.interpretation.state_machine import GestureStateMachine, State
 from airdesk.perception.hand_tracker import Hand, user_side
 
@@ -163,3 +168,47 @@ def test_mediapipe_label_is_inverted_for_the_user():
     assert user_side("Right") == "left"
     assert user_side("?") == "unknown"
     assert Hand([(0.0, 0.0, 0.0)] * 21, "Left", 0.9).side == "right"
+
+
+# --- Nombre de mains demandées à MediaPipe ----------------------------------------------------
+
+
+def test_idle_with_an_empty_field_searches_one_hand():
+    """Log 18-43-22 : 435 images en mode 2 mains, en veille, sans aucune main visible."""
+    policy = TrackerModePolicy("right")
+    for t in range(0, 1000, 33):
+        assert policy.hands_to_search(t, idle=True, pilot_found=False,
+                                      other_hand_seen=False) == 1
+
+
+def test_idle_with_the_other_hand_searches_two_hands_for_a_while():
+    policy = TrackerModePolicy("right", two_hands_hold_ms=1000)
+    assert policy.hands_to_search(0, True, pilot_found=False, other_hand_seen=True) == 2
+    assert policy.hands_to_search(500, True, pilot_found=True, other_hand_seen=False) == 2
+    assert policy.hands_to_search(1000, True, pilot_found=True, other_hand_seen=False) == 1
+
+
+def test_active_searches_two_hands_only_after_three_lost_frames():
+    policy = TrackerModePolicy("right", search_after_lost_frames=3)
+    assert policy.hands_to_search(0, False, pilot_found=True, other_hand_seen=False) == 1
+    assert policy.hands_to_search(33, False, pilot_found=False, other_hand_seen=False) == 1
+    assert policy.hands_to_search(66, False, pilot_found=False, other_hand_seen=False) == 1
+    assert policy.hands_to_search(99, False, pilot_found=False, other_hand_seen=False) == 2
+    assert policy.hands_to_search(132, False, pilot_found=True, other_hand_seen=False) == 1
+
+
+def test_track_support_always_searches_two_hands():
+    policy = TrackerModePolicy("right", track_support=True)
+    assert policy.hands_to_search(0, True, False, False) == 2
+    assert policy.hands_to_search(33, False, True, False) == 2
+
+
+def test_any_hand_can_pilot_so_one_hand_is_enough_when_idle():
+    policy = TrackerModePolicy("any")
+    assert policy.hands_to_search(0, True, pilot_found=False, other_hand_seen=True) == 1
+
+
+def test_idle_with_the_pilot_found_searches_one_hand_even_beside_the_other():
+    """Les deux mains visibles et la main pilote trouvée : inutile de chercher 2 mains."""
+    policy = TrackerModePolicy("right")
+    assert policy.hands_to_search(0, True, pilot_found=True, other_hand_seen=True) == 1

@@ -123,3 +123,52 @@ class HandSelector:
         if not others:
             return None
         return self._largest(others, candidates)
+
+
+class TrackerModePolicy:
+    """Nombre de mains à demander à MediaPipe pour l'image suivante (1 ou 2).
+
+    Chercher 2 mains coûte cher : MediaPipe relance la détection de paume à chaque image
+    (19 ms contre 9 avec une main suivie, 11 sur un champ vide ; log 2026-11-24_18-43-22, où
+    435 images sur 479 en mode 2 mains étaient en veille SANS AUCUNE main visible). On ne
+    cherche donc 2 mains que lorsque c'est utile pour trouver la main pilote :
+    - en veille, seulement si une main NON pilote est visible (le modèle 1 main a pu
+      s'accrocher à la main gauche) : 2 mains pendant `two_hands_hold_ms`, pour trouver la
+      main pilote à côté d'elle ; champ vide ou main pilote trouvée : 1 main ;
+    - une fois actif, seulement après `search_after_lost_frames` images d'affilée sans main
+      pilote (une perte d'une ou deux images se rattrape en 1 main) ;
+    - `track_support` (suivre la main d'appoint) : toujours 2 mains ;
+    - `preferred: any` : toute main est pilote, 1 main suffit en veille.
+    """
+
+    def __init__(self, preferred: str = "right", track_support: bool = False,
+                 two_hands_hold_ms: float = 1000, search_after_lost_frames: int = 3):
+        self.preferred = preferred
+        self.track_support = track_support
+        self.two_hands_hold_ms = two_hands_hold_ms
+        self.search_after_lost_frames = search_after_lost_frames
+        self._lost_frames = 0  # images d'affilée sans main pilote
+        self._two_until_ms: float | None = None  # 2 mains jusqu'à cet instant (veille)
+
+    def hands_to_search(self, t_ms: float, idle: bool, pilot_found: bool,
+                        other_hand_seen: bool) -> int:
+        """`pilot_found` et `other_hand_seen` décrivent l'image PRÉCÉDENTE."""
+        if self.track_support:
+            return 2
+        if pilot_found:
+            self._lost_frames = 0
+        else:
+            self._lost_frames += 1
+        # Une autre main SANS la main pilote : le modèle 1 main s'est peut-être accroché à
+        # elle ; on cherche 2 mains un moment. Si la main pilote est là, 1 main suffit.
+        if other_hand_seen and not pilot_found and self.preferred != "any":
+            self._two_until_ms = t_ms + self.two_hands_hold_ms
+        if idle:
+            if self.preferred == "any":
+                return 1
+            if self._two_until_ms is not None and t_ms < self._two_until_ms:
+                return 2
+            return 1
+        if self._lost_frames >= self.search_after_lost_frames:
+            return 2
+        return 1

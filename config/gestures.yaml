@@ -19,7 +19,25 @@ pinch:
   # "exit" > "enter" évite les relâchements involontaires pendant un glisser.
   enter: 0.25
   exit: 0.40
-  # Un pincement plus court que ça = clic. Plus long = saisie (glisser).
+  # Mode de clic :
+  # - press (comme une souris) : Press dès le contact confirmé, Release au relâchement ; le
+  #   curseur reste figé pendant l'appui tant que la main ne s'éloigne pas de drag_threshold.
+  #   C'est le système qui distingue clic, double-clic et glisser. Latence du clic : environ
+  #   min_press_frames images après le contact, au lieu de ~400 ms ;
+  # - release (d'origine, pour comparer) : clic émis au relâchement, glisser après
+  #   click_max_ms. Retour d'usage du 2026-11-24 : délai ressenti à chaque clic.
+  click_mode: press
+  # Mode press : images de pincement d'affilée avant le Press (anti-glitch du suivi).
+  min_press_frames: 2
+  # Mode press : distance (tailles de main) entre le point de contact et la main au-delà de
+  # laquelle le curseur se remet à suivre (glisser). Déplacement du poignet pendant 24 vrais
+  # clics de P01 (3 logs) : 20 sous 0,12, traîne 0,23 / 0,34 / 0,36 / 0,50. À ajuster avec
+  # scripts/analyse_log.py (déplacement pendant les clics, saut au début des glisser).
+  drag_threshold: 0.15
+  # Mode press : au début d'un glisser, le curseur rejoint la main en ce temps (ms) au lieu
+  # de sauter du point figé à la main (pointage absolu). 0 = saut direct.
+  drag_catchup_ms: 100
+  # Mode release : un pincement plus court que ça = clic. Plus long = saisie (glisser).
   click_max_ms: 400
   # Règle anti-poing (poing fermé = pouce sur l'index replié = faux pincement).
   # A = d'origine (mesure seule) ; B = A + index tendu ;
@@ -77,6 +95,12 @@ hand:
   # Suivre aussi la main d'appoint une fois actif (futurs gestes à deux mains) : ~10 ms de
   # plus par image (MediaPipe doit chercher 2 mains). Inutile pour l'instant.
   track_support: false
+  # Mode 2 mains (coûteux) seulement quand il sert : en veille, une main non pilote visible
+  # fait chercher 2 mains pendant two_hands_hold_ms ; une fois actif, seulement après
+  # search_after_lost_frames images sans main pilote. Log 18-43-22 : 435 des 479 images en
+  # mode 2 mains étaient en veille avec un champ vide.
+  two_hands_hold_ms: 1000
+  search_after_lost_frames: 3
 
 quality:
   # Garde-fou : une image est ignorée (comme « main absente ») si hand_size tombe sous

@@ -135,6 +135,17 @@ class GestureStateMachine:
         self._prev_pointer: tuple[float, float] | None = None
         self._last_target: tuple[float, float] | None = None  # dernier MoveTo émis
         self._below_since_ms: float | None = None  # depuis quand la main est sous la zone
+        # Mode de clic « press » (comme une souris) : bouton enfoncé dès le contact confirmé.
+        self._pressed = False  # bouton de la souris enfoncé (Press émis, pas encore Release)
+        self._pinch_frames = 0  # images consécutives de pincement depuis le contact
+        self._anchor: tuple[float, float] | None = None  # point de pointage au contact
+        # Rattrapage : le curseur figé rejoint la main progressivement (voir _catch_up).
+        self._catchup_from: tuple[float, float] | None = None  # position du curseur figé
+        self._catchup_start_ms: float | None = None
+        # Pour le log : instant du contact du pincement dont le premier Press / Click vient
+        # d'être émis (None sinon), et distance au point d'ancrage pendant un appui.
+        self.event_contact_ms: float | None = None
+        self.anchor_distance: float | None = None
 
     def update(
         self,
@@ -144,6 +155,8 @@ class GestureStateMachine:
     ) -> list[Event]:
         """Fait avancer la machine d'une image. `features` et `pointer` valent None sans main."""
         events: list[Event] = []
+        self.event_contact_ms = None
+        self.anchor_distance = None
 
         # --- Pas de main visible ---
         if features is None or pointer is None:
@@ -158,11 +171,12 @@ class GestureStateMachine:
             if self._last_seen_ms is not None:
                 lost_for = t_ms - self._last_seen_ms
             if self.state != State.IDLE and lost_for > self.engagement.lost_timeout_ms:
-                if self.state == State.DRAGGING:
+                if self.state == State.DRAGGING or self._pressed:
                     events.append(Release())
                 self.state = State.IDLE
                 self._pinch_detector.reset()
                 self._below_since_ms = None
+                self._pressed = False
             return events
 
         self._last_seen_ms = t_ms
@@ -196,9 +210,10 @@ class GestureStateMachine:
             if self._below_since_ms is None:
                 self._below_since_ms = t_ms
             elif t_ms - self._below_since_ms >= self.engagement.rest_ms:
-                if self.state == State.DRAGGING:
+                if self.state == State.DRAGGING or self._pressed:
                     events.append(Release())  # on ne laisse pas le bouton enfoncé
-                # Un pincement court en cours est simplement annulé : pas de clic.
+                # Un pincement court en cours (mode release) est simplement annulé : pas de clic.
+                self._pressed = False
                 self.state = State.IDLE
                 self._below_since_ms = None
                 self._arm_start_ms = None
@@ -212,6 +227,7 @@ class GestureStateMachine:
         if self.state != State.PINCHING:
             if self.pointer.mode == "absolute":
                 target = zone_to_screen(pointer[0], pointer[1], self.pointer.zone)
+                target = self._catch_up(t_ms, target)
                 if target != self._last_target:
                     events.append(MoveTo(target[0], target[1]))
                     self._last_target = target
@@ -245,6 +261,10 @@ class GestureStateMachine:
         else:
             self.entry_block = self._pinch_detector.last_block or ""
 
+        if self.pinch.click_mode == "press":
+            self._update_press_mode(t_ms, pinch_event, features, pointer, events)
+            return events
+
         if self.state == State.ACTIVE:
             if pinch_event == "start":
                 self.state = State.PINCHING
@@ -253,6 +273,7 @@ class GestureStateMachine:
         elif self.state == State.PINCHING:
             if pinch_event == "end":
                 events.append(Click())
+                self.event_contact_ms = self._pinch_start_ms
                 self.state = State.ACTIVE
             elif self._pinch_detector.releasing:
                 # Relâchement en cours de confirmation (release_grace_ms) : pas de Press. La
@@ -261,6 +282,7 @@ class GestureStateMachine:
                 pass
             elif t_ms - self._pinch_start_ms > self.pinch.click_max_ms:
                 events.append(Press())
+                self.event_contact_ms = self._pinch_start_ms
                 self.state = State.DRAGGING
 
         elif self.state == State.DRAGGING:
@@ -269,3 +291,87 @@ class GestureStateMachine:
                 self.state = State.ACTIVE
 
         return events
+
+    def _update_press_mode(self, t_ms, pinch_event, features, pointer, events) -> None:
+        """Mode « press », comme une souris : c'est le système qui distingue clic et glisser.
+
+        - Contact (la détection dit « start ») : PINCHING ; le curseur se fige.
+        - Après `min_press_frames` images de pincement d'affilée : Press. Un pincement plus
+          bref (glitch du suivi) ne produit rien.
+        - Bouton enfoncé, le curseur reste figé tant que la main ne s'est pas éloignée du point
+          de contact de plus de `drag_threshold` tailles de main ; au-delà : DRAGGING, le
+          curseur suit (après un rattrapage progressif, voir _catch_up).
+        - Relâchement confirmé : Release. Clic sur place = Press puis Release au même point ;
+          deux clics rapides font un double-clic, comme avec une vraie souris.
+        """
+        if self.state == State.ACTIVE:
+            if pinch_event == "start":
+                self.state = State.PINCHING
+                self._pinch_start_ms = t_ms
+                self._pinch_frames = 1
+                self._anchor = pointer
+                self._pressed = False
+                self._press_if_confirmed(events)
+            return
+
+        if self.state == State.PINCHING:
+            if pinch_event == "end":
+                if self._pressed:
+                    events.append(Release())  # clic sur place
+                # Sinon : pincement trop bref pour être confirmé, rien n'a été envoyé.
+                self._pressed = False
+                self.state = State.ACTIVE
+                return
+            if not self._pressed:
+                # Image de pincement de plus, sauf si un relâchement est déjà en cours de
+                # confirmation : le pincement n'est alors plus « présent ».
+                if not self._pinch_detector.releasing:
+                    self._pinch_frames += 1
+                    self._press_if_confirmed(events)
+                return
+            self.anchor_distance = self._distance_from_anchor(pointer, features)
+            if self.anchor_distance > self.pinch.drag_threshold:
+                self.state = State.DRAGGING  # la main part : c'est un glisser
+                self._start_catch_up(t_ms)
+            return
+
+        if self.state == State.DRAGGING:
+            self.anchor_distance = self._distance_from_anchor(pointer, features)
+            if pinch_event == "end":
+                events.append(Release())
+                self._pressed = False
+                self.state = State.ACTIVE
+
+    def _press_if_confirmed(self, events: list[Event]) -> None:
+        if self._pinch_frames >= self.pinch.min_press_frames:
+            events.append(Press())
+            self._pressed = True
+            self.event_contact_ms = self._pinch_start_ms
+
+    def _distance_from_anchor(self, pointer, features) -> float:
+        """Distance du point de pointage au point de contact, en tailles de main."""
+        size = features.hand_size if features.hand_size > 1e-6 else 1e-6
+        dx = pointer[0] - self._anchor[0]
+        dy = pointer[1] - self._anchor[1]
+        return (dx * dx + dy * dy) ** 0.5 / size
+
+    def _start_catch_up(self, t_ms: float) -> None:
+        """Le curseur, figé jusqu'ici, va rejoindre la main progressivement (_catch_up)."""
+        self._catchup_start_ms = t_ms
+        self._catchup_from = self._last_target
+
+    def _catch_up(self, t_ms: float, target: tuple[float, float]) -> tuple[float, float]:
+        """Quand le curseur cesse d'être figé (début d'un glisser ; pointage absolu), il
+        rejoint la main progressivement pendant `drag_catchup_ms` au lieu de sauter du point
+        figé à la main (le saut vaut jusqu'à drag_threshold tailles de main, une centaine de
+        pixels).
+        Interpolation linéaire : figé + k x (main - figé), k passant de 0 à 1."""
+        if (self._catchup_start_ms is None or self._catchup_from is None
+                or self.pinch.drag_catchup_ms <= 0):
+            return target
+        k = (t_ms - self._catchup_start_ms) / self.pinch.drag_catchup_ms
+        if k >= 1:
+            self._catchup_start_ms = None  # rattrapage terminé
+            return target
+        u0, v0 = self._catchup_from
+        return (u0 + k * (target[0] - u0), v0 + k * (target[1] - v0))

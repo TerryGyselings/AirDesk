@@ -26,9 +26,14 @@ from airdesk.log_analysis import (
     OUTCOME_NONE,
     SLOW_FRAME_MS,
     block_reason,
+    click_mode,
+    estimated_latencies,
     frame_interval_ms,
+    latencies,
+    mean_and_p95,
     pinch_durations,
     pinch_thresholds,
+    press_episodes,
     read_log,
     read_metadata,
     release_grace,
@@ -72,6 +77,7 @@ def main() -> None:
         metadata = read_metadata(json_path)
         enter, exit_, click_max_ms = pinch_thresholds(metadata)
         grace_ms = release_grace(metadata)
+        mode = click_mode(metadata)
         camera = metadata.get("camera", {})
         git = metadata.get("git", {})
         commit = git.get("commit") or "inconnu"
@@ -90,8 +96,9 @@ def main() -> None:
         pinch = load_config().pinch
         enter, exit_, click_max_ms = pinch.enter, pinch.exit, pinch.click_max_ms
         grace_ms = pinch.release_grace_ms
+        mode = pinch.click_mode
     print(f"Seuils : enter={enter}, exit={exit_}, click_max_ms={click_max_ms}, "
-          f"release_grace_ms={grace_ms:g}\n")
+          f"release_grace_ms={grace_ms:g} | mode de clic : {mode}\n")
 
     s = summarize(rows)
     print(f"Images : {s.frames} en {s.duration_s:.2f} s, soit {s.fps_mean:.1f} images/s en moyenne")
@@ -127,7 +134,10 @@ def main() -> None:
     for p in pinches:
         durations.append(p.duration_ms)
         # Ce que donnerait le seuil : en dessous de click_max_ms, la machine émet un clic.
+        # (En mode press, click_max_ms ne sert pas : c'est le déplacement qui décide.)
         expected = "clic" if p.duration_ms <= click_max_ms else "glisser"
+        if mode == "press":
+            expected = "-"
         print(
             f"{p.start_ms:>10} | {p.duration_ms:>4} ms | {p.outcome:<14} | {p.ended_by:<11} | "
             f"{expected}"
@@ -142,6 +152,11 @@ def main() -> None:
             elif not has_entry_block:
                 print(f"{'':>10}   -> raison inconnue (colonne entry_block absente de ce log)")
 
+    print()
+    print_latency(rows, mode, pinches)
+    if mode == "press":
+        print_press_episodes(rows)
+
     print("\nDurée des pincements :")
     for line in text_histogram(durations, marker=click_max_ms, marker_label="click_max_ms"):
         print("  " + line)
@@ -152,6 +167,57 @@ def main() -> None:
     )
 
     print_jitter(rows, args.immobile_speed)
+
+
+def print_latency(rows, mode: str, pinches) -> None:
+    """Latence de l'interprétation : contact des doigts -> premier Press / Click.
+
+    Sans la caméra ni MediaPipe (communs aux deux modes) : c'est la partie que le mode de
+    clic change. Mode release : durée du pincement + release_grace_ms ; mode press : environ
+    min_press_frames images."""
+    found = latencies(rows)
+    how = "mesurée"
+    if not found:
+        found = estimated_latencies(rows, pinches)
+        how = "ESTIMÉE depuis pinch_ratio (log sans colonne contact_ms)"
+    if not found:
+        print(f"Latence contact -> clic (mode {mode}) : aucun clic.")
+        return
+    values = []
+    for latency in found:
+        values.append(latency.latency_ms)
+    mean, p95 = mean_and_p95(values)
+    print(f"Latence contact -> Press/Click (mode {mode}, {how}) : {len(values)} pincement(s), "
+          f"moyenne {mean:.0f} ms, P95 {p95:.0f} ms")
+
+
+def print_press_episodes(rows) -> None:
+    """Mode press : déplacement de la main pendant les clics (pour régler drag_threshold) et
+    saut du curseur au début des glisser (compensé par drag_catchup_ms)."""
+    episodes = press_episodes(rows)
+    if not episodes:
+        return
+    click_moves = []
+    jumps = []
+    for e in episodes:
+        if e.dragged:
+            if e.jump_px is not None:
+                jumps.append(e.jump_px)
+        elif e.max_anchor_distance is not None:
+            click_moves.append(e.max_anchor_distance)
+    if click_moves:
+        values = []
+        for value in sorted(click_moves):
+            values.append(f"{value:.2f}")
+        print("Déplacement max. de la main pendant les clics (tailles de main) : "
+              + " ".join(values))
+        print("  -> drag_threshold doit rester au-dessus des clics volontaires.")
+    if jumps:
+        values = []
+        for value in jumps:
+            values.append(f"{value:.0f}")
+        print(f"Saut du curseur au début des glisser (px, sans rattrapage) : {' '.join(values)}"
+              f" | médiane {statistics.median(jumps):.0f}, max {max(jumps):.0f}")
 
 
 def cell(value: float | None) -> str:

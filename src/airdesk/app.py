@@ -19,7 +19,11 @@ from airdesk.capture import Camera
 from airdesk.config import apply_cli_overrides, load_config
 from airdesk.interpretation import GestureStateMachine, State, compute_features
 from airdesk.interpretation.features import MIDDLE_MCP, WRIST, distance_2d, wrist_speed
-from airdesk.interpretation.hand_selection import HandCandidate, HandSelector
+from airdesk.interpretation.hand_selection import (
+    HandCandidate,
+    HandSelector,
+    TrackerModePolicy,
+)
 from airdesk.interpretation.pointing import zone_to_screen
 from airdesk.perception import HandTracker, PointFilter
 from airdesk.session_log import SessionLog, build_metadata
@@ -78,7 +82,11 @@ def run(
     fps = 0.0
     last_frame_time = time.perf_counter()
     previous_hand = None  # (timestamp_ms, landmarks) de la main suivie, pour sa vitesse
-    pilot_lost = True  # au départ, il faut chercher la main pilote
+    tracker_policy = TrackerModePolicy(cfg.hand.preferred, cfg.hand.track_support,
+                                       cfg.hand.two_hands_hold_ms,
+                                       cfg.hand.search_after_lost_frames)
+    pilot_found = False  # main pilote trouvée à l'image précédente
+    other_hand_seen = False  # main non pilote vue à l'image précédente
 
     print(f"Ouverture de la caméra {camera_cfg.index} (quelques secondes)...")
     forced_backend = None if camera_cfg.backend == "auto" else camera_cfg.backend
@@ -116,12 +124,13 @@ def run(
                 aspect = frame_width / frame_height
 
                 # 1) Les mains, leurs descripteurs, puis le rôle de chacune.
-                # 2 mains à chercher seulement quand il faut trouver la main pilote (veille, ou
-                # main pilote perdue à l'image précédente) : sinon MediaPipe relance à chaque
-                # image la détection de paume, coûteuse (19 ms au lieu de 9).
+                # 2 mains à chercher seulement quand c'est utile pour trouver la main pilote
+                # (voir TrackerModePolicy) : sinon MediaPipe relance à chaque image la détection
+                # de paume, coûteuse (19 ms au lieu de 9).
                 idle = machine.state == State.IDLE
-                search_two = idle or pilot_lost or cfg.hand.track_support
-                hands = tracker.detect(frame.rgb, frame.timestamp_ms, 2 if search_two else 1)
+                tracker_hands = tracker_policy.hands_to_search(
+                    frame.timestamp_ms, idle, pilot_found, other_hand_seen)
+                hands = tracker.detect(frame.rgb, frame.timestamp_ms, tracker_hands)
                 all_features = []
                 candidates = []
                 for hand in hands:
@@ -132,8 +141,9 @@ def run(
                 roles = selector.select(candidates, idle=idle)
                 selected = roles.pilot
                 # Avec le modèle 1 main, MediaPipe peut s'accrocher à l'autre main : le
-                # sélecteur la refuse, et l'image suivante cherche de nouveau 2 mains.
-                pilot_lost = selected is None
+                # sélecteur la refuse, et TrackerModePolicy fait chercher 2 mains.
+                pilot_found = selected is not None
+                other_hand_seen = len(hands) > (1 if pilot_found else 0)
 
                 features = None
                 pointer = None
@@ -178,7 +188,9 @@ def run(
                         closing_speed=machine.closing_speed,
                         closing_speed_3d=machine.closing_speed_3d,
                         entry_block=machine.entry_block,
-                        tracker_hands=2 if search_two else 1,
+                        tracker_hands=tracker_hands,
+                        contact_ms=machine.event_contact_ms,
+                        anchor_distance=machine.anchor_distance,
                     )
 
                 if show_preview:

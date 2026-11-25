@@ -24,11 +24,16 @@ from airdesk.log_analysis import (
     OUTCOME_CLICK,
     OUTCOME_DRAG,
     OUTCOME_NONE,
+    Pinch,
     Row,
     block_reason,
+    estimated_latencies,
+    latencies,
+    mean_and_p95,
     percentile,
     pinch_durations,
     pinch_thresholds,
+    press_episodes,
     read_log,
     read_metadata,
     still_periods,
@@ -385,3 +390,71 @@ def test_new_log_columns_round_trip(tmp_path):
     row = read_log(log.csv_path)[0]
     assert row.entry_block == "paume"
     assert row.tracker_hands == 1
+
+
+# --- Mode press : latence, déplacement pendant les clics, saut au début des glisser -----------
+
+
+def press_row(t, state, events=(), contact=None, distance=None, cursor=(1000, 500)):
+    return Row(t, True, 0.1, 3, state, list(events), 9.0, cursor=cursor, contact_ms=contact,
+               anchor_distance=distance)
+
+
+def press_log():
+    """Un clic sur place (déplacement max 0,08) puis un glisser (saut de 150 px)."""
+    return [
+        press_row(0, "pincement"),
+        press_row(33, "pincement", ["press"], contact=0, cursor=(1000, 500)),
+        press_row(66, "pincement", distance=0.05),
+        press_row(99, "pincement", distance=0.08),
+        press_row(132, "actif", ["release"]),
+        press_row(500, "pincement"),
+        press_row(533, "pincement", ["press"], contact=500, cursor=(1200, 500)),
+        press_row(566, "pincement", distance=0.10, cursor=(1250, 500)),
+        press_row(599, "glisser", distance=0.30, cursor=(1350, 500)),
+        press_row(632, "glisser", ["moveto"], distance=0.40, cursor=(1400, 500)),
+        press_row(665, "actif", ["release"]),
+    ]
+
+
+def test_latency_from_the_contact_column():
+    found = latencies(press_log())
+    assert [x.latency_ms for x in found] == [33, 33]
+    assert mean_and_p95([33, 33, 400]) == (pytest.approx(155.33, abs=0.01), 400)
+
+
+def test_press_episodes_measure_movement_and_jump():
+    clicks, drag = press_episodes(press_log())
+    assert not clicks.dragged
+    assert clicks.max_anchor_distance == 0.08
+    assert drag.dragged
+    assert drag.jump_px == 150  # curseur figé (1200, 500) -> main au passage en glisser
+    assert drag.max_anchor_distance == 0.40
+
+
+def test_press_mode_clicks_and_drags_are_counted():
+    s = summarize(press_log())
+    assert (s.clicks, s.drags) == (1, 1)
+
+
+def test_press_mode_outcome_is_a_click_without_drag():
+    rows = []
+    ratios = [0.1, 0.1, 0.1, 0.8]
+    states = ["pincement", "pincement", "pincement", "actif"]
+    events = [[], ["press"], [], ["release"]]
+    for i in range(4):
+        rows.append(Row(i * 33, True, ratios[i], 3, states[i], events[i], 9.0))
+    pinch = pinch_durations(rows, 0.25, 0.40)[0]
+    assert pinch.outcome == OUTCOME_CLICK
+
+
+def test_estimated_latency_for_old_logs():
+    rows = [
+        Row(0, True, 0.8, 4, "actif", [], 9.0),
+        Row(33, True, 0.1, 3, "pincement", [], 9.0),
+        Row(333, True, 0.8, 3, "actif", [], 9.0),
+        Row(400, True, 0.8, 3, "actif", ["click"], 9.0),
+    ]
+    found = estimated_latencies(rows, [Pinch(33, 333, OUTCOME_CLICK, END_RELEASED)])
+    assert [x.latency_ms for x in found] == [367]
+

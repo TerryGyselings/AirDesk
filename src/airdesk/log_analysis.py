@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,8 @@ class Row:
     cursor: tuple[int, int] | None = None  # position calculée du curseur (pointage absolu)
     entry_block: str = ""  # pourquoi un pincement ne pouvait pas commencer ("" : il le pouvait)
     tracker_hands: int | None = None  # mains demandées à MediaPipe (1 ou 2)
+    contact_ms: float | None = None  # contact des doigts, sur l'image du premier Press/Click
+    anchor_distance: float | None = None  # mode press : distance au point de contact
 
 
 def optional_float(record: dict, name: str) -> float | None:
@@ -74,6 +77,8 @@ def read_log(path: Path) -> list[Row]:
                     entry_block=record.get("entry_block") or "",
                     tracker_hands=int(record["tracker_hands"]) if record.get("tracker_hands")
                     else None,
+                    contact_ms=optional_float(record, "contact_ms"),
+                    anchor_distance=optional_float(record, "anchor_distance"),
                 )
             )
     return rows
@@ -222,6 +227,11 @@ def pinch_thresholds(metadata: dict) -> tuple[float, float, float]:
     return pinch["enter"], pinch["exit"], pinch["click_max_ms"]
 
 
+def click_mode(metadata: dict) -> str:
+    """Mode de clic de la session ("release" pour les logs d'avant le mode press)."""
+    return metadata["config"]["pinch"].get("click_mode", "release")
+
+
 def release_grace(metadata: dict) -> float:
     """Délai de relâchement en vigueur pendant la session (0 pour les anciens logs)."""
     return metadata["config"]["pinch"].get("release_grace_ms", 0)
@@ -251,15 +261,23 @@ def summarize(rows: list[Row]) -> Summary:
     if duration_s > 0:
         fps_mean = (len(rows) - 1) / duration_s
 
+    # Compté de la même façon dans les deux modes de clic :
+    # - glisser = la machine passe à l'état « glisser » ;
+    # - clic = événement Click (mode release), ou Release depuis l'état « pincement » sans
+    #   être passé en glisser (mode press : Press puis Release sur place).
     processing = []
     clicks = 0
     drags = 0
+    previous_state = ""
     for row in rows:
         processing.append(row.processing_ms)
         if "click" in row.events:
             clicks += 1
-        if "press" in row.events:  # un glisser commence par un Press
+        if "release" in row.events and previous_state == "pincement":
+            clicks += 1
+        if row.state == "glisser" and previous_state != "glisser":
             drags += 1
+        previous_state = row.state
 
     return Summary(
         frames=len(rows),
@@ -338,11 +356,14 @@ def pinch_durations(
         if i + 1 < len(spans) and spans[i + 1][0] <= limit:
             limit = spans[i + 1][0] - 1  # ne pas déborder sur le pincement suivant
         events_seen: list[str] = []
+        dragged = False
         for row in rows:
             if start <= row.timestamp_ms <= limit:
                 for name in row.events:
                     events_seen.append(name)
-        pinches.append(Pinch(start, end, outcome_of(events_seen), ended_by))
+                if row.state == "glisser":
+                    dragged = True
+        pinches.append(Pinch(start, end, outcome_of(events_seen, dragged), ended_by))
     return pinches
 
 
@@ -402,11 +423,13 @@ def timing_by_mode(rows: list[Row]) -> list[ModeTiming]:
     return result
 
 
-def outcome_of(events: list[str]) -> str:
-    """Ce qu'a donné un pincement d'après les événements émis pendant sa durée."""
-    if "press" in events:
+def outcome_of(events: list[str], dragged: bool) -> str:
+    """Ce qu'a donné un pincement, d'après les événements émis pendant sa durée et le passage
+    de la machine à l'état « glisser ». En mode press, un clic est un Press suivi d'un
+    Release sans passer en glisser ; en mode release, c'est un Click."""
+    if dragged:
         return OUTCOME_DRAG
-    if "click" in events:
+    if "click" in events or "press" in events:
         return OUTCOME_CLICK
     return OUTCOME_NONE
 
@@ -459,3 +482,103 @@ def text_histogram(
             line += f"   <- {marker_label}"
         lines.append(line)
     return lines
+
+
+# --- Latence du clic, déplacement pendant les clics, saut au début des glisser --------------
+
+
+@dataclass
+class Latency:
+    """Contact des doigts -> premier événement du pincement (Press ou Click)."""
+
+    contact_ms: float
+    event_ms: int
+    event: str  # "press" ou "click"
+
+    @property
+    def latency_ms(self) -> float:
+        return self.event_ms - self.contact_ms
+
+
+def latencies(rows: list[Row]) -> list[Latency]:
+    """Une latence par pincement qui a produit un Press ou un Click (colonne contact_ms)."""
+    found = []
+    for row in rows:
+        if row.contact_ms is None:
+            continue
+        event = "press"
+        if "click" in row.events:
+            event = "click"
+        found.append(Latency(row.contact_ms, row.timestamp_ms, event))
+    return found
+
+
+def estimated_latencies(rows: list[Row], pinches: list[Pinch]) -> list[Latency]:
+    """Pour les logs sans colonne contact_ms : contact = début du pincement retrouvé dans
+    pinch_ratio, événement = premier Press / Click émis ensuite, avant le pincement suivant
+    (et au plus 3 s après). Estimation : même seuil enter que la machine, mais sans les
+    conditions de la règle (un pincement refusé ne produit pas d'événement, donc pas de
+    latence)."""
+    found = []
+    for i in range(len(pinches)):
+        start = pinches[i].start_ms
+        limit = start + 3000
+        if i + 1 < len(pinches) and pinches[i + 1].start_ms - 1 < limit:
+            limit = pinches[i + 1].start_ms - 1
+        for row in rows:
+            if row.timestamp_ms < start or row.timestamp_ms > limit:
+                continue
+            if "click" in row.events or "press" in row.events:
+                event = "click" if "click" in row.events else "press"
+                found.append(Latency(start, row.timestamp_ms, event))
+                break
+    return found
+
+
+def mean_and_p95(values: list[float]) -> tuple[float, float]:
+    return sum(values) / len(values), percentile(values, 95)
+
+
+@dataclass
+class PressEpisode:
+    """Mode press : un appui (Press ... Release)."""
+
+    start_ms: int
+    max_anchor_distance: float | None  # plus grande distance au point de contact
+    dragged: bool  # passé en glisser
+    jump_px: float | None  # glisser : écart curseur figé -> main au passage en glisser
+
+
+def press_episodes(rows: list[Row]) -> list[PressEpisode]:
+    """Découpe les appuis du mode press : du Press au Release (ou à la fin du log).
+
+    Saut : distance en pixels entre la position du curseur à l'image du Press (le curseur
+    reste figé là) et la position calculée de la main à l'image où l'état passe en
+    « glisser » ; c'est le saut qu'aurait le curseur sans rattrapage (drag_catchup_ms)."""
+    episodes = []
+    current = None
+    anchor_cursor = None
+    for row in rows:
+        if "press" in row.events and current is None:
+            current = PressEpisode(row.timestamp_ms, None, False, None)
+            anchor_cursor = row.cursor
+            continue
+        if current is None:
+            continue
+        if row.anchor_distance is not None:
+            if (current.max_anchor_distance is None
+                    or row.anchor_distance > current.max_anchor_distance):
+                current.max_anchor_distance = row.anchor_distance
+        if row.state == "glisser" and not current.dragged:
+            current.dragged = True
+            if anchor_cursor is not None and row.cursor is not None:
+                dx = row.cursor[0] - anchor_cursor[0]
+                dy = row.cursor[1] - anchor_cursor[1]
+                current.jump_px = math.hypot(dx, dy)
+        if "release" in row.events:
+            episodes.append(current)
+            current = None
+    if current is not None:
+        episodes.append(current)
+    return episodes
+

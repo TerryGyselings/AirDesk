@@ -304,3 +304,44 @@ Retour d'usage de P01 (logs 18-19-43 et 18-22-34, commit fb6d299) :
 - Protocole v4 : `pincements_repetes_gauche` (positif), `main_repos_profil_gauche` et
   `va_et_vient_gauche` (négatifs, un aller-retour centre ↔ gauche toutes les 2 s, le geste qui
   provoque les faux clics en réel).
+
+## 2026-11-24 — Clic « comme une souris » (mode press) ; moins de mode 2 mains
+
+Retour d'usage (log 18-43-22, commit 1c3379b) : le clic devenu glisser est corrigé (12 clics,
+dont 328 et 344 ms, aucun glisser parasite) et les clics à gauche passent. **Mais un délai
+est ressenti à chaque clic.**
+
+- **Cause de la latence** : en mode « release », le clic n'est émis qu'au relâchement
+  confirmé, soit durée du pincement + release_grace_ms. Estimé depuis pinch_ratio :
+  **363 ms en moyenne, 422 ms au P95** entre le contact des doigts et le clic (log 18-43-22),
+  sans compter la caméra ni MediaPipe.
+- **Décision : `click_mode: press` par défaut**, comme une souris : Press dès que le
+  pincement est présent sur `min_press_frames` = 2 images (filtre anti-glitch, une image
+  isolée ne produit rien), Release au relâchement confirmé. Le système distingue clic,
+  double-clic et glisser. Latence attendue : environ 1 image (≈ 40 ms à 24 i/s).
+  `click_mode: release` reste disponible pour comparer, la colonne `contact_ms` du log et
+  analyse_log.py mesurent la latence des deux modes.
+- **Curseur figé pendant l'appui, puis glisser** : sinon le tremblement de la main pendant
+  le pincement déplacerait le clic. Le curseur reste figé tant que la main ne s'est pas
+  éloignée du point de contact de plus de `drag_threshold`. Déplacement du poignet pendant
+  24 vrais clics (logs 18-19-43, 18-22-34, 18-43-22, en tailles de main) : 20 sous 0,12,
+  traîne 0,23 / 0,34 / 0,36 / 0,50. **Choix : 0,15**, à revoir avec la colonne
+  `anchor_distance` (en mode press, l'utilisateur sait que le curseur est figé).
+  Contrepartie : un clic qui bouge plus que ça (la traîne) devient un petit glisser.
+- **Rattrapage au début du glisser** (`drag_catchup_ms: 100`) : en pointage absolu, au
+  dépassement du seuil le curseur devrait sauter du point figé à la main (≈ 0,15 taille de
+  main, de l'ordre de 100 px, à vérifier : analyse_log.py affiche ce saut pour chaque
+  glisser). Il rejoint la main par interpolation linéaire en 100 ms ; 0 = saut direct.
+- **Perte de la main ou main baissée, bouton enfoncé** : Release, y compris pendant un
+  appui sur place (mode press).
+- **Mode 2 mains** : 479 images sur 1106 (43 %) dans le log 18-43-22, dont **435 en veille
+  sans aucune main visible**, 24 en veille avec une main, et seulement 20 une fois actif
+  (19 juste après une perte). Chercher 2 mains coûte 18,9 ms par image sur un champ vide,
+  contre 11 ms pour une main. Nouvelle règle (`TrackerModePolicy`) : en veille, 2 mains
+  seulement si une main NON pilote est visible sans la main pilote (pendant 1 s) ; une fois
+  actif, seulement après 3 images d'affilée sans main pilote. Essai sans fenêtre, main
+  pilote visible en veille : 100 % des images en mode 1 main, 9,1 ms en moyenne (18,4 ms
+  avant la règle).
+- Correction de l'analyse : le nombre de glisser comptait chaque Press ; il compte désormais
+  les passages à l'état « glisser », pour que les clics du mode press (Press + Release) ne
+  soient pas comptés comme des glisser.

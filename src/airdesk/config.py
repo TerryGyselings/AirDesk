@@ -55,6 +55,13 @@ class PinchConfig:
     # Un relâchement en cours n'est annulé que si la mesure redescend sous exit - cette marge
     # (0 = comportement d'origine). Voir PinchHysteresis.
     release_cancel_margin: float = 0.0
+    # Mode de clic : "release" (clic émis au relâchement, d'origine) ou "press" (comme une
+    # souris : Press dès le contact confirmé, Release au relâchement ; le système distingue
+    # clic et glisser). En mode press :
+    click_mode: str = "release"
+    min_press_frames: int = 2  # images de pincement d'affilée avant Press (anti-glitch)
+    drag_threshold: float = 0.15  # tailles de main : au-delà, le curseur suit (glisser)
+    drag_catchup_ms: float = 100  # rattrapage progressif du curseur au début du glisser
     # Règles F / F3D (non branchées) : vitesse de fermeture minimale des doigts.
     min_closing_speed: float = 0.0
     min_closing_speed_3d: float = 0.0
@@ -134,6 +141,10 @@ class HandConfig:
     # Suivre la main d'appoint une fois actif (futurs gestes à deux mains). Coûte ~10 ms par
     # image : MediaPipe doit alors chercher 2 mains à chaque image.
     track_support: bool = False
+    # En veille, une main non pilote visible fait chercher 2 mains pendant ce temps (ms).
+    two_hands_hold_ms: float = 1000
+    # Une fois actif, on ne cherche 2 mains qu'après ce nombre d'images sans main pilote.
+    search_after_lost_frames: int = 3
 
 
 @dataclass(frozen=True)

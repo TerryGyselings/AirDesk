@@ -19,11 +19,25 @@ Projet innovation-recherche — ESIR, Université de Rennes (2026-2027).
 | Main pilote ouverte dans la zone d'interaction pendant 0,3 s | Active le contrôle |
 | Déplacer la main dans la zone d'interaction | Place le curseur (pointage absolu) |
 | Baisser la main sous la zone pendant 0,5 s | Retour en veille (un glisser est relâché) |
-| Pincement bref pouce-index (< `click_max_ms`, 0,4 s) | Clic gauche |
+| Pincement pouce-index sur place | Clic gauche (bouton enfoncé au contact, relâché à l'ouverture des doigts) |
+| Deux pincements rapides sur place | Double-clic |
 | Pincement maintenu puis déplacement | Glisser-déposer (ex. déplacer une fenêtre par sa barre de titre) |
 | Main hors du champ plus de 1 s | Retour en veille |
 
 Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
+
+**Mode de clic** (`pinch.click_mode`) :
+
+- **`press` (par défaut), comme une souris** : le bouton est enfoncé dès que le pincement
+  est confirmé (`min_press_frames` images, 2 par défaut), et relâché quand les doigts
+  s'ouvrent. Pendant l'appui, le curseur reste **figé** tant que la main ne s'éloigne pas du
+  point de contact de plus de `drag_threshold` (0,15 taille de main) ; au-delà, il suit la
+  main (glisser) et la rejoint en `drag_catchup_ms` (100 ms) au lieu de sauter. C'est
+  Windows qui distingue clic, double-clic et glisser. Le clic part environ 1 image après
+  le contact.
+- **`release` (d'origine, pour comparer)** : le clic n'est émis qu'au relâchement ; un
+  pincement plus long que `click_max_ms` (0,4 s) devient un glisser. Délai ressenti :
+  environ 360 ms entre le contact et le clic.
 
 **Bien se placer** :
 
@@ -35,9 +49,10 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
   Pendant un glisser, garder pouce et index collés et bouger la main sans à-coups.
 - **Non reconnu** : le pincement index pointé vers la caméra, autres doigts repliés. C'est
   une décision de conception : ce geste ressemble trop à un poing pour être distingué de
-  façon fiable. Une main au repos **de profil** (pouce contre l'index) n'est pas non plus
-  prise pour un pincement : il faut que la paume fasse face à la caméra
-  (`pinch.require_palm_facing`, `min_palm_width`).
+  façon fiable. Une main au repos **de profil** (pouce contre l'index) peut encore être prise
+  pour un pincement : la condition de paume (`pinch.require_palm_facing`) est désactivée,
+  car elle refusait aussi les vrais clics de la main tournée vers la gauche de l'écran.
+  Pistes à l'étude : protocole v4 de `record_gestures.py`.
 
 **Pointage** (`pointer` dans `gestures.yaml`) :
 
@@ -68,7 +83,9 @@ jamais le contrôle, même si la main pilote sort du champ. Pour piloter de la m
 `hand.preferred: left` (ou `any` pour l'ancien comportement : n'importe quelle main).
 
 **Fluidité** : chercher 2 mains coûte cher (≈ 19 ms par image au lieu de 9) ; AirDesk ne le
-fait qu'en veille, pour trouver la main pilote, puis suit une seule main. Au démarrage, un
+fait que lorsqu'une autre main que la main pilote est visible en veille (pendant
+`hand.two_hands_hold_ms`), ou après `hand.search_after_lost_frames` images sans main pilote
+une fois actif. Sinon, il suit une seule main. Au démarrage, un
 avertissement s'affiche si la caméra donne moins de 25 images/s (souvent : pièce trop
 sombre).
 
@@ -153,14 +170,20 @@ python scripts/analyse_log.py      # analyse le log le plus récent
   doigts tendus, extension de chaque doigt en 2D et 3D, doigts repliés, `pinch_ratio_3d`,
   vitesse de fermeture des doigts (`closing_speed`, `closing_speed_3d`), état, événements
   émis, temps de traitement, **`entry_block`** (pourquoi un pincement ne peut pas commencer :
-  `veille`, `hors_zone`, `ratio`, `paume`, `autres_doigts`...) et **`tracker_hands`** (1 ou
-  2 mains demandées à MediaPipe). **Aucune image** (RGPD) ;
+  `veille`, `hors_zone`, `ratio`, `paume`, `autres_doigts`...), **`tracker_hands`** (1 ou
+  2 mains demandées à MediaPipe), **`contact_ms`** (instant du contact des doigts, sur
+  l'image du premier Press / Click) et **`anchor_distance`** (mode press : distance de la
+  main au point de contact). **Aucune image** (RGPD) ;
 - `AAAA-MM-JJ_HH-MM-SS.json` : les réglages en vigueur (config complète fusionnée, version,
   commit git et modifications non commitées, système, caméra réellement ouverte).
 
 `analyse_log.py` affiche les images/s, le temps de traitement (moyenne et 95e percentile,
 puis séparément en mode 1 main et 2 mains, pour localiser les pics), le nombre de clics et
-de glisser, pour chaque pincement sans issue la raison du refus (`entry_block`), puis la durée de chaque pincement avec un histogramme texte
+de glisser, la **latence contact → Press/Click** (moyenne et P95 ; estimée depuis
+`pinch_ratio` pour les anciens logs), en mode press le déplacement de la main pendant les
+clics (pour régler `drag_threshold`) et le saut du curseur au début de chaque glisser, pour
+chaque pincement sans issue la raison du refus (`entry_block`), puis la durée de chaque
+pincement avec un histogramme texte
 et la position de `click_max_ms`. Les durées sont calculées à partir de `pinch_ratio` et des
 seuils `enter`/`exit` lus dans le `.json` du log, et non à partir des états de la machine,
 qui dépendent justement de `click_max_ms`.
