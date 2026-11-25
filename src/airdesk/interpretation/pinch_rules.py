@@ -268,6 +268,11 @@ class PinchHysteresis:
       tapes 31 à 125 ms après un relâchement (dont les 4 doubles-clics du log
       2026-11-25_17-10-10). Le faux pincement que F vise (pouce posé, main de profil au
       repos) ne suit pas un relâchement récent.
+      L'exemption exige aussi que l'appelant signale un vrai candidat 2e tape
+      (`second_tap_candidate`, calculé par la machine : main près du point du clic précédent
+      et poignet lent). Sans cela, en traversant l'écran vite après un clic, des contacts
+      exemptés à tort devenaient des glisser (log 2026-11-25_17-54-53 : 62 125 et 64 827 ms,
+      poignet à 3,46 et 4,43, à 252 et 203 px du clic). Par défaut : pas candidat.
     - Relâchement RELATIF (`release_rise`) : relâchement immédiat quand la mesure remonte de
       plus de `release_rise` au-dessus de son minimum depuis le contact (et au-dessus de
       enter), même sans atteindre exit. Deux tapes rapides font deux creux séparés par une
@@ -330,12 +335,15 @@ class PinchHysteresis:
         closing_speed_3d: float | None = None,
         wrist_speed: float | None = None,
         allow_rise_release: bool = False,
+        second_tap_candidate: bool = False,
     ) -> str | None:
         if not self.pinched:
-            # Exemption F / F3D : juste après un relâchement (2e tape d'un double-clic).
+            # Exemption F / F3D : 2e tape d'un double-clic, juste après un relâchement ET
+            # signalée comme candidate par l'appelant (main lente, près du clic précédent).
             skip_closing = False
             grace = self.thresholds.closing_grace_ms
-            if grace > 0 and self.last_end_ms is not None and t_ms - self.last_end_ms <= grace:
+            recent = self.last_end_ms is not None and t_ms - self.last_end_ms <= grace
+            if grace > 0 and recent and second_tap_candidate:
                 skip_closing = True
             self.last_block = entry_block_reason(
                 self.rule, pinch_value, extensions, extensions_3d, self.thresholds,

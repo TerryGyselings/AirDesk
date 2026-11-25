@@ -110,6 +110,13 @@ pinch:
   # après un relâchement, dont les 4 doubles-clics du 17-10-10. 300 ms les couvre et reste
   # sous le délai de double-clic (500 ms). 0 = pas d'exemption.
   closing_grace_ms: 300
+  # L'exemption ne vaut que pour un vrai candidat 2e tape : main à moins de double_click_snap
+  # du point du clic précédent (double_click_snap 0 = pas d'exemption) ET poignet plus lent
+  # que closing_grace_max_speed (tailles de main / s). Logs réels : 26 vraies 2es tapes à
+  # 1-22 px du clic, poignet 0,08 à 0,68 ; contacts exemptés à tort en traversant l'écran
+  # (log 17-54-53 : 22 468, 22 750, 62 125, 64 827 ms) à 203-333 px, poignet 1,84 à 4,43.
+  # 1,0 : marge +0,32 / -0,84.
+  closing_grace_max_speed: 1.0
   # Mesure comparée à enter / exit : ratio (pouce -> bout de l'index), seg78 / seg68
   # (pouce -> segment 7-8 ou 6-8 de l'index). enter / exit doivent être réglés pour elle.
   measure: ratio

@@ -555,3 +555,42 @@ de remettre 0,87** : D compte sur ce seuil contre la main de profil.
 Tests : le clic à gauche de 102 531 ms est refusé à 0,87 et accepté à 0,65 (règle F) ; un
 poing qui se ferme vite (autres doigts à 0,45) reste refusé à 0,65 (et serait accepté à
 0,40).
+
+## 2026-11-25 — Exemption de fermeture réservée aux vraies 2es tapes
+
+Défaut vu en réel lors d'un déplacement rapide de gauche à droite (log 17-54-53) :
+l'exemption `closing_grace_ms` (2e tape d'un double-clic) laissait passer des contacts qui
+n'en étaient pas, juste après un clic :
+- 62 125 ms : glisser de 921 ms, fermeture 0,18, poignet 3,46, 48 ms après un relâchement ;
+- 64 827 ms : glisser de 891 ms, fermeture 0,32, poignet 4,43, 31 ms après ;
+- même schéma, plus bref, à 22 468 et 22 750 ms (ce dernier suit un glisser, pas un clic).
+
+Contacts exemptés dans tous les logs (fermeture < 0,4, moins de 300 ms après un relâchement) :
+
+| | contacts | distance au point du clic précédent | poignet au contact |
+|---|---|---|---|
+| 2es tapes de double-clic (19-12-46, 19-28-35, 17-10-10, 17-41-02, 17-54-53) | 26 | 1 à 22 px (≤ 0,04 taille de main) | 0,08 à 0,68 |
+| traversée rapide (17-54-53) | 4 | 203 à 333 px (0,3 à 0,5) | 1,84 à 4,43 |
+
+**Correction** : l'exemption exige un vrai candidat 2e tape, calculé par la machine
+(`second_tap_candidate`) :
+- le relâchement précédent est un clic sur place, pas un glisser ;
+- la main est à moins de `double_click_snap` (0,08 taille de main) du point de ce clic ;
+- la vitesse du poignet est connue et inférieure à **`closing_grace_max_speed: 1.0`**
+  (marge +0,32 sur la 2e tape la plus rapide, -0,84 sous la traversée la plus lente).
+
+Sinon, la condition normale de F (fermeture ≥ 0,4) s'applique. **Rejeu sur tous les logs :
+26 / 26 2es tapes restent exemptées, 4 / 4 contacts exemptés à tort sont refusés.** Nouvelle
+colonne du log `second_tap` ; analyse_log.py affiche, pour chaque contact sous le seuil, la
+vitesse du poignet et la distance au clic précédent.
+
+**Limite** : 23 921 et 26 625 ms (même traversée) n'étaient pas exemptés. Leur fermeture
+(2,81 et 1,12) dépasse 0,4, donc F les accepte normalement. De même, dans le rejeu de
+64 827 ms, un pic de fermeture à 2,61 en plein mouvement (65 014 ms, suivi bruité) fait entrer
+un contact. Seule la vitesse du poignet les distingue : voir `max_contact_speed` (entrée
+suivante).
+
+Incident pendant la modification : en ajoutant `closing_grace_max_speed`, la ligne
+`closing_grace_ms: 300` du yaml a été effacée. Repéré par l'analyse (aucun contact exempté),
+avant tout commit. Un test vérifie maintenant que la configuration du projet garde
+l'exemption en règle F.

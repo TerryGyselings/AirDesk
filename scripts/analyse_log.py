@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import statistics
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from airdesk.config import load_config
@@ -238,11 +238,17 @@ def print_closing_summary(rows, pinches, contacts, closing) -> None:
         return
     refusals = refused_for_closing(rows, pinches)
     note = ""
+    current = closing_settings(asdict(load_config().pinch))
     if not closing.active:
         # Log enregistré sans condition de fermeture : on compare aux réglages ACTUELS, pour
         # voir ce que F aurait fait de ces contacts.
-        closing = closing_settings(asdict(load_config().pinch))
+        closing = current
         note = " ; log sans règle F : comparaison avec les réglages actuels"
+    elif closing.closing_grace_max_speed <= 0:
+        # Log en règle F d'avant closing_grace_max_speed (exemption au seul délai) : on
+        # applique la règle d'exemption actuelle pour voir ce qu'elle change.
+        closing = replace(closing, closing_grace_max_speed=current.closing_grace_max_speed)
+        note = " ; log d'avant la condition de 2e tape : exemption actuelle appliquée"
     threshold = closing.min_closing_speed
     print(f"Vitesse de fermeture (règle {closing.rule}, min_closing_speed {threshold:g}, "
           f"closing_grace_ms {closing.closing_grace_ms:g}{note}) :")
@@ -257,8 +263,11 @@ def print_closing_summary(rows, pinches, contacts, closing) -> None:
         label = f"{c.contact_ms} ({fmt(c.closing_speed)}"
         if c.since_release_ms is not None:
             label += f", {c.since_release_ms} ms après un relâchement"
+        label += f", poignet {fmt(c.wrist_speed)}"
+        if c.distance_px is not None:
+            label += f", {c.distance_px:.0f} px du clic"
         label += ")"
-        if c.since_release_ms is not None and c.since_release_ms <= closing.closing_grace_ms:
+        if is_exempted(c, closing):
             exempted.append(label)
         else:
             below.append(label)
@@ -267,6 +276,25 @@ def print_closing_summary(rows, pinches, contacts, closing) -> None:
     if below:
         what = "acceptés hors exemption" if not note else "que F aurait refusés"
         print(f"  sous le seuil, {what} : {len(below)} : " + " ; ".join(below))
+
+
+# double_click_snap (0,08 taille de main) en pixels, pour les logs sans colonne second_tap :
+# 570 à 700 px par taille de main dans les logs du 2026-11-24 et 25, soit 45 à 56 px.
+SNAP_PX_APPROX = 50.0
+
+
+def is_exempted(contact, closing) -> bool:
+    """Le contact est-il exempté de la condition de fermeture ? Juste après un relâchement ET
+    candidat 2e tape : colonne second_tap si le log l'a ; sinon, approximation par la
+    vitesse du poignet et la distance en pixels au clic précédent."""
+    since = contact.since_release_ms
+    if since is None or since > closing.closing_grace_ms:
+        return False
+    if contact.second_tap is not None:
+        return contact.second_tap
+    if contact.wrist_speed is None or contact.wrist_speed >= closing.closing_grace_max_speed:
+        return False
+    return contact.distance_px is not None and contact.distance_px <= SNAP_PX_APPROX
 
 
 def print_pin_offsets(rows) -> None:

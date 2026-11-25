@@ -79,6 +79,10 @@ class PinchConfig:
     # Règles F / F3D : pas de condition de fermeture pour un contact moins de ce temps (ms)
     # après la fin du pincement précédent (2e tape d'un double-clic). 0 = pas d'exemption.
     closing_grace_ms: float = 0.0
+    # L'exemption ne vaut que pour un vrai candidat 2e tape : main à moins de
+    # double_click_snap du clic précédent ET vitesse du poignet sous ce seuil (tailles de
+    # main / s). 0 = jamais d'exemption.
+    closing_grace_max_speed: float = 0.0
     # Règles F / F3D (non branchées) : vitesse de fermeture minimale des doigts.
     min_closing_speed: float = 0.0
     min_closing_speed_3d: float = 0.0

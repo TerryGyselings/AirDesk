@@ -39,6 +39,7 @@ class Row:
     pin_kind: str = ""  # clic épinglé : press, press_snap, release, release_snap
     pin_offset_px: float | None = None  # écart main -> point épinglé (px)
     closing_speed: float | None = None  # vitesse de fermeture des doigts (règles F / F3D)
+    second_tap: bool | None = None  # candidat 2e tape (None : colonne absente du log)
 
 
 def optional_float(record: dict, name: str) -> float | None:
@@ -87,6 +88,7 @@ def read_log(path: Path) -> list[Row]:
                     pin_kind=record.get("pin_kind") or "",
                     pin_offset_px=optional_float(record, "pin_offset_px"),
                     closing_speed=optional_float(record, "closing_speed"),
+                    second_tap=read_second_tap(record),
                 )
             )
     return rows
@@ -242,6 +244,7 @@ class ClosingSettings:
     rule: str
     min_closing_speed: float
     closing_grace_ms: float
+    closing_grace_max_speed: float = 0.0
 
     @property
     def active(self) -> bool:
@@ -251,7 +254,15 @@ class ClosingSettings:
 def closing_settings(pinch: dict) -> ClosingSettings:
     """D'après la section `pinch` de la config (0 pour les logs d'avant ces réglages)."""
     return ClosingSettings(pinch.get("rule", "A"), pinch.get("min_closing_speed", 0.0),
-                           pinch.get("closing_grace_ms", 0.0))
+                           pinch.get("closing_grace_ms", 0.0),
+                           pinch.get("closing_grace_max_speed", 0.0))
+
+
+def read_second_tap(record: dict) -> bool | None:
+    """Colonne second_tap : True / False, ou None pour les logs d'avant cette colonne."""
+    if "second_tap" not in record:
+        return None
+    return record["second_tap"] == "1"
 
 
 def has_press(events: list[str]) -> bool:
@@ -757,6 +768,11 @@ class ContactClosing:
     closing_speed: float | None  # à l'image du contact (None : historique trop court)
     since_release_ms: int | None  # temps depuis le dernier relâchement (None : aucun avant)
     outcome: str  # OUTCOME_CLICK, OUTCOME_DRAG ou OUTCOME_NONE (Press jamais confirmé)
+    wrist_speed: float | None = None  # vitesse du poignet au contact (tailles de main / s)
+    # Distance (px) au point du clic sur place précédent ; None après un glisser ou sans
+    # position du curseur (pointage relatif).
+    distance_px: float | None = None
+    second_tap: bool | None = None  # colonne second_tap du log (None : absente)
 
 
 def contact_closing_speeds(rows: list[Row]) -> list[ContactClosing]:
@@ -765,16 +781,29 @@ def contact_closing_speeds(rows: list[Row]) -> list[ContactClosing]:
     est exempté de la condition de fermeture (closing_grace_ms)."""
     found = []
     last_release_ms = None
+    contact_cursor = None  # position de la main au contact de l'appui en cours
+    dragged = False  # l'appui en cours est passé en glisser
+    click_cursor = None  # position au contact du dernier clic sur place
     for i in range(len(rows)):
         row = rows[i]
         if i > 0 and row.state == "pincement" and rows[i - 1].state == "actif":
             since = None
             if last_release_ms is not None:
                 since = row.timestamp_ms - last_release_ms
+            distance = None
+            if click_cursor is not None and row.cursor is not None:
+                distance = math.hypot(row.cursor[0] - click_cursor[0],
+                                      row.cursor[1] - click_cursor[1])
             found.append(ContactClosing(row.timestamp_ms, row.closing_speed, since,
-                                        outcome_after(rows, i)))
+                                        outcome_after(rows, i), row.wrist_speed, distance,
+                                        row.second_tap))
+            contact_cursor = row.cursor
+            dragged = False
+        if row.state == "glisser":
+            dragged = True
         if has_release(row.events) or "click" in row.events:
             last_release_ms = row.timestamp_ms
+            click_cursor = None if dragged else contact_cursor
     return found
 
 

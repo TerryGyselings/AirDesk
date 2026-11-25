@@ -385,11 +385,13 @@ F_SEUILS = RuleThresholds(enter=0.25, folded_below=0.8, min_closing_speed=0.4,
                           closing_grace_ms=300)
 
 
-def run_f(hysteresis, frames):
-    """frames : liste de (t_ms, pinch_ratio, closing_speed)."""
+def run_f(hysteresis, frames, candidate=True):
+    """frames : liste de (t_ms, pinch_ratio, closing_speed) ; `candidate` : la machine signale
+    un candidat 2e tape (main près du clic précédent, poignet lent)."""
     events = []
     for t, value, closing in frames:
-        event = hysteresis.update(t, value, TENDUS, TENDUS, closing_speed=closing)
+        event = hysteresis.update(t, value, TENDUS, TENDUS, closing_speed=closing,
+                                  second_tap_candidate=candidate)
         if event is not None:
             events.append((event, t))
     return events
@@ -434,7 +436,8 @@ def test_grace_does_not_skip_the_other_conditions():
     """L'exemption ne porte que sur la fermeture : un poing reste refusé (règle D)."""
     h = PinchHysteresis("F", F_SEUILS, exit=0.40)
     run_f(h, [(0, 0.10, 2.0), (33, 0.50, -1.0)])
-    assert h.update(97, 0.20, POING, POING, closing_speed=-0.3) is None
+    assert h.update(97, 0.20, POING, POING, closing_speed=-0.3,
+                    second_tap_candidate=True) is None
     assert h.last_block == BLOCK_OTHER_FINGERS
 
 
@@ -444,3 +447,12 @@ def test_rules_with_an_entry_condition():
     assert not rule_has_entry_condition("D")
     with pytest.raises(ValueError):
         rule_has_entry_condition("Z")
+
+
+def test_no_grace_without_a_second_tap_candidate():
+    """Juste après un relâchement, mais main loin du clic ou poignet rapide (traversée de
+    l'écran, log 17-54-53) : la condition normale de fermeture s'applique."""
+    h = PinchHysteresis("F", F_SEUILS, exit=0.40)
+    frames = [(0, 0.10, 2.0), (33, 0.50, -1.0), (64, 0.20, 0.32)]
+    assert run_f(h, frames, candidate=False) == [("start", 0), ("end", 33)]
+    assert h.last_block == BLOCK_CLOSING

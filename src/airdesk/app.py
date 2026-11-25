@@ -217,6 +217,7 @@ def run(
                         anchor_distance=machine.anchor_distance,
                         pin_kind=machine.pin_kind,
                         pin_offset_px=pin_offset,
+                        second_tap=machine.second_tap_candidate,
                     )
 
                 if show_preview:

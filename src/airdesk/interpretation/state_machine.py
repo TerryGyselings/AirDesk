@@ -173,6 +173,12 @@ class GestureStateMachine:
         self._last_click_ms: float | None = None
         self._last_click_pin: tuple[float, float] | None = None
         self._last_click_anchor: tuple[float, float] | None = None
+        # Point de pointage du dernier clic sur place (les deux pointages), pour l'exemption
+        # de fermeture de la 2e tape (voir _is_second_tap_candidate). None après un glisser.
+        self._grace_anchor: tuple[float, float] | None = None
+        # Pour le log (colonne second_tap) : ce contact peut-il être la 2e tape d'un
+        # double-clic ? (près du clic précédent, poignet lent)
+        self.second_tap_candidate = False
         self._snapped = False  # l'appui en cours est aimanté sur le clic précédent
         # Pour le log : instant du contact du pincement dont le premier Press / Click vient
         # d'être émis (None sinon), distance au point d'ancrage pendant un appui, et type de
@@ -217,6 +223,7 @@ class GestureStateMachine:
                 self._below_since_ms = None
                 self._pressed = False
                 self._last_click_ms = None  # une série de clics ne survit pas à la veille
+                self._grace_anchor = None
             return events
 
         self._last_seen_ms = t_ms
@@ -255,6 +262,7 @@ class GestureStateMachine:
                 # Un pincement court en cours (mode release) est simplement annulé : pas de clic.
                 self._pressed = False
                 self._last_click_ms = None
+                self._grace_anchor = None
                 self.state = State.IDLE
                 self._below_since_ms = None
                 self._arm_start_ms = None
@@ -290,6 +298,10 @@ class GestureStateMachine:
         pinch_event = None
         may_start = inside or not self.pinch.only_in_zone
         already_pinched = self._pinch_detector.pinched
+        self.second_tap_candidate = False
+        if not already_pinched:
+            self.second_tap_candidate = self._is_second_tap_candidate(pointer, features,
+                                                                      wrist_speed)
         if already_pinched or may_start:
             pinch_event = self._pinch_detector.update(
                 t_ms,
@@ -303,6 +315,7 @@ class GestureStateMachine:
                 # Relâchement relatif (release_rise) : seulement pendant un appui sur place,
                 # jamais pendant un glisser (il y couperait le glisser, voir docs/journal.md).
                 self.pinch.click_mode == "press" and self.state == State.PINCHING,
+                self.second_tap_candidate,
             )
         if already_pinched:
             self.entry_block = "pincement_en_cours"
@@ -385,6 +398,7 @@ class GestureStateMachine:
             if self.anchor_distance > self.pinch.drag_threshold:
                 self.state = State.DRAGGING  # la main part : c'est un glisser
                 self._last_click_ms = None  # un glisser interrompt la série de clics
+                self._grace_anchor = None  # ni aimant, ni exemption après un glisser
                 self._start_catch_up(t_ms)
             return
 
@@ -437,6 +451,7 @@ class GestureStateMachine:
 
     def _release_in_place(self, t_ms: float, events: list[Event]) -> None:
         """Fin d'un clic sur place : Release au point épinglé, puis le curseur rejoint la main."""
+        self._grace_anchor = self._anchor  # point du clic, pour l'exemption de la 2e tape
         if self.pointer.mode != "absolute":
             events.append(Release())
             return
@@ -447,6 +462,23 @@ class GestureStateMachine:
         self._last_click_pin = self._pin
         self._last_click_anchor = self._anchor
         self._start_catch_up(t_ms)
+
+    def _is_second_tap_candidate(self, pointer, features, wrist_speed) -> bool:
+        """Ce contact peut-il être la 2e tape d'un double-clic ? (exemption de fermeture de la
+        règle F, voir PinchHysteresis). Il faut, après un clic sur place :
+        - la main à moins de `double_click_snap` tailles de main du point de ce clic ;
+        - un poignet lent : vitesse connue et < `closing_grace_max_speed`.
+        Logs réels : 26 vraies 2es tapes à 1-22 px du clic, poignet 0,08 à 0,68 ; contacts
+        exemptés à tort en traversant l'écran (log 17-54-53) à 203-333 px, poignet 1,84 à
+        4,43. Le délai (closing_grace_ms) est vérifié par PinchHysteresis."""
+        if self._grace_anchor is None or self.pinch.double_click_snap <= 0:
+            return False
+        if wrist_speed is None or wrist_speed >= self.pinch.closing_grace_max_speed:
+            return False
+        size = features.hand_size if features.hand_size > 1e-6 else 1e-6
+        dx = pointer[0] - self._grace_anchor[0]
+        dy = pointer[1] - self._grace_anchor[1]
+        return (dx * dx + dy * dy) ** 0.5 / size <= self.pinch.double_click_snap
 
     def _distance_from_anchor(self, pointer, features) -> float:
         """Distance du point de pointage au point de contact, en tailles de main."""

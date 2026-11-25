@@ -75,6 +75,9 @@ COLUMNS = (
         "pin_kind",
         # Écart en px entre la main et le point épinglé (ce que l'épinglage corrige)
         "pin_offset_px",
+        # Règle F : ce contact est un candidat 2e tape de double-clic (près du clic précédent,
+        # poignet lent), qui peut être exempté de la condition de fermeture (1 ; vide sinon)
+        "second_tap",
     ]
 )
 
@@ -216,6 +219,7 @@ class SessionLog:
         anchor_distance: float | None = None,
         pin_kind: str = "",
         pin_offset_px: float | None = None,
+        second_tap: bool = False,
     ) -> None:
         """Une ligne par image. `features` vaut None quand aucune main n'est visible.
 
@@ -245,6 +249,7 @@ class SessionLog:
         row.append(optional(anchor_distance, 3))
         row.append(pin_kind)
         row.append(optional(pin_offset_px, 1))
+        row.append(1 if second_tap else "")
         self._writer.writerow(row)
 
     def __exit__(self, *exc) -> None:

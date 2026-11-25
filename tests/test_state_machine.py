@@ -462,6 +462,16 @@ def test_project_configuration_builds_a_machine():
     assert m.pinch.measure in MEASURES
 
 
+def test_project_configuration_keeps_the_second_tap_grace():
+    """Règle F en service : sans exemption, les doubles-clics rapides seraient refusés ou
+    retardés (garde-fou : une ligne du yaml perdue lors d'une modification)."""
+    pinch = load_config(local_path=None).pinch
+    if pinch.rule in ("F", "F3D"):
+        assert pinch.closing_grace_ms > 0
+        assert pinch.closing_grace_max_speed > 0
+        assert pinch.double_click_snap > 0
+
+
 # --- Clic devenu glisser (log 2026-11-24_18-19-43, 79 296 ms) ----------------------------------
 # pinch_ratio réel, image par image : pincement de 79 296 à 79 640 ms, puis relâchement lent
 # qui OSCILLE autour d'exit (0,40). Autres doigts ouverts (extension ≈ 1,05).
@@ -988,8 +998,9 @@ MERGED_TAPS_58375 = [
 ]
 
 
-def replay(sequence, rule="D", fingers=None, **pinch_args):
-    """Rejoue une séquence réelle en mode press, règle D par défaut (réglages du 2026-11-24)."""
+def replay(sequence, rule="D", fingers=None, hand_size=0.2, **pinch_args):
+    """Rejoue une séquence réelle en mode press, règle D par défaut (réglages du 2026-11-24).
+    `hand_size` : taille de la main (le log ne la garde pas ; 0,2 par défaut)."""
     pinch = PinchConfig(rule=rule, click_mode="press", release_grace_ms=66,
                         release_cancel_margin=0.05, **pinch_args)
     m = GestureStateMachine(ENGAGEMENT, pinch, fingers, pointer=PointerConfig(mode="absolute"))
@@ -1002,7 +1013,7 @@ def replay(sequence, rule="D", fingers=None, **pinch_args):
     for t, ratio, extensions, position, speed in sequence:
         f = replace(features(pinch_ratio=ratio, extended_fingers=3, extension=1.4),
                     finger_extensions=extensions, finger_extensions_3d=extensions,
-                    index_extension=extensions[0])
+                    index_extension=extensions[0], hand_size=hand_size)
         for event in m.update(t, f, position, speed):
             events.append((t, event))
     return events
@@ -1263,7 +1274,8 @@ REAL_DOUBLE_CLICKS = [
 def replay_rule_f(sequence, closing_grace_ms):
     """Réglages de l'essai du 2026-11-25 : règle F, min_closing_speed 0,4."""
     return replay(sequence, rule="F", min_closing_speed=0.4, closing_grace_ms=closing_grace_ms,
-                  release_fast_margin=0.05, release_rise=0.15, double_click_snap=0.08)
+                  closing_grace_max_speed=1.0, release_fast_margin=0.05, release_rise=0.15,
+                  double_click_snap=0.08)
 
 
 @pytest.mark.parametrize("index", [0, 1, 2, 3])
@@ -1327,7 +1339,8 @@ LEFT_CLICK_102531 = [
 def replay_with_folded_below(sequence, folded_below):
     fingers = FingersConfig(folded_below=folded_below, folded_below_3d=0.91)
     return replay(sequence, rule="F", fingers=fingers, min_closing_speed=0.4,
-                  closing_grace_ms=300, release_fast_margin=0.05, release_rise=0.15)
+                  closing_grace_ms=300, closing_grace_max_speed=1.0, double_click_snap=0.08,
+                  release_fast_margin=0.05, release_rise=0.15)
 
 
 def test_left_click_refused_with_087_is_accepted_with_065():
@@ -1346,3 +1359,103 @@ def test_fast_closing_fist_is_still_refused_with_065():
     for i in range(len(ratios)):
         sequence.append((1000 + 33 * i, ratios[i], fist, (0.5, 0.5), 0.2))
     assert count(replay_with_folded_below(sequence, 0.65), PressAt) == 0
+
+
+# --- Exemption de fermeture : seulement pour un vrai candidat 2e tape ----------------------------
+# Log 2026-11-25_17-54-53, traversée rapide de l'écran : un clic sur place (64 296 ms), puis
+# 31 ms après son relâchement un contact à 4,43 tailles de main / s, à 203 px du clic
+# (64 827 ms), qui était exempté et devenait un glisser de 891 ms. Taille de main ≈ 0,33
+# (anchor_distance 0,125 pour 0,041 de déplacement à 64 750 ms).
+FAST_CROSSING_64827 = [
+    (64264, 0.3144, (1.15, 1.36, 1.32, 1.19), (0.2807, 0.8456), 0.250),
+    (64296, 0.1785, (1.12, 1.35, 1.35, 1.21), (0.2779, 0.8456), 0.746),
+    (64343, 0.1978, (1.13, 1.33, 1.33, 1.17), (0.2775, 0.8453), 0.087),
+    (64375, 0.2654, (1.10, 1.30, 1.32, 1.17), (0.2779, 0.8450), 0.102),
+    (64421, 0.1671, (1.12, 1.32, 1.31, 1.18), (0.2780, 0.8449), 0.028),
+    (64468, 0.1609, (1.14, 1.34, 1.32, 1.17), (0.2812, 0.8469), 0.634),
+    (64500, 0.1740, (1.13, 1.34, 1.33, 1.18), (0.2828, 0.8454), 0.546),
+    (64546, 0.1998, (1.13, 1.34, 1.31, 1.18), (0.2850, 0.8465), 0.421),
+    (64577, 0.1992, (1.11, 1.32, 1.29, 1.14), (0.2862, 0.8463), 0.340),
+    (64625, 0.2197, (1.11, 1.32, 1.28, 1.14), (0.2870, 0.8453), 0.192),
+    (64671, 0.1638, (1.07, 1.29, 1.26, 1.13), (0.2942, 0.8466), 1.303),
+    (64702, 0.1819, (1.06, 1.24, 1.26, 1.13), (0.3023, 0.8477), 2.146),
+    (64750, 0.1282, (1.04, 1.23, 1.20, 1.04), (0.3190, 0.8525), 2.744),
+    (64796, 0.6664, (1.15, 1.16, 1.18, 1.00), (0.3402, 0.8614), 3.651),
+    (64827, 0.1549, (1.07, 1.22, 1.19, 1.02), (0.3575, 0.8652), 4.431),
+    (64875, 0.1107, (0.96, 1.13, 1.07, 0.90), (0.3886, 0.8769), 5.007),
+    (64905, 0.1597, (0.99, 1.05, 1.03, 0.90), (0.4275, 0.8836), 9.325),
+    (64968, 0.1078, (0.90, 1.01, 0.97, 0.80), (0.4668, 0.8894), 4.366),
+    (65014, 0.0981, (0.89, 1.01, 0.96, 0.73), (0.5033, 0.8909), 5.537),
+    (65046, 0.1146, (0.87, 0.98, 0.94, 0.76), (0.5410, 0.8900), 8.120),
+    (65093, 0.1216, (0.82, 0.94, 0.92, 0.78), (0.5745, 0.8856), 4.867),
+]
+
+
+def replay_crossing(**overrides):
+    """Réglages en service (règle F, folded_below 0,65...), avec des surcharges."""
+    settings = {"min_closing_speed": 0.4, "closing_grace_ms": 300,
+                "closing_grace_max_speed": 1.0, "double_click_snap": 0.08,
+                "release_fast_margin": 0.05, "release_rise": 0.15}
+    for name in overrides:
+        settings[name] = overrides[name]
+    fingers = FingersConfig(folded_below=0.65, folded_below_3d=0.91)
+    return replay(FAST_CROSSING_64827, rule="F", fingers=fingers, hand_size=0.33, **settings)
+
+
+def test_fast_contact_after_a_click_is_not_exempted():
+    """64 827 ms n'est plus exempté (fermeture 0,32 < 0,4) : refusé. LIMITE : à 65 014 ms, un
+    pic de fermeture (2,61, suivi bruité en plein mouvement) fait quand même entrer un contact,
+    Press à 65 046 ms. La vitesse du poignet (5,54) le distingue : max_contact_speed."""
+    events = replay_crossing()
+    assert press_times(events) == [64343, 65046]
+    assert count(events, ReleaseAt) == 1  # le clic sur place de 64 296 ms
+
+
+def test_fast_contact_was_exempted_without_the_candidate_conditions():
+    """Conditions relâchées (aimant 1 taille de main, pas de limite de vitesse) : on retrouve
+    le défaut, le contact de 64 827 ms est exempté et appuie dès l'image suivante."""
+    events = replay_crossing(double_click_snap=1.0, closing_grace_max_speed=100)
+    assert press_times(events) == [64343, 64875]
+
+
+def machine_rule_f():
+    engagement = EngagementConfig(hold_ms=300, lost_timeout_ms=1000)
+    pinch = PinchConfig(rule="F", click_mode="press", min_closing_speed=0.4,
+                        closing_grace_ms=300, closing_grace_max_speed=1.0,
+                        double_click_snap=0.08, drag_threshold=0.15)
+    return GestureStateMachine(engagement, pinch, pointer=PointerConfig(mode="absolute"))
+
+
+def re_pinch_after(m, t, position):
+    """Relâche, puis repince aussitôt au même endroit, poignet lent : fermeture négative sur
+    200 ms (la mesure remonte depuis le creux précédent)."""
+    m.update(t, OPEN, position, 0.2)  # relâchement
+    m.update(t + 33, PINCH, position, 0.2)  # nouveau contact 33 ms après
+    return m.second_tap_candidate
+
+
+def test_second_tap_candidate_after_a_click_in_place():
+    m = machine_rule_f()
+    t = activate(m)
+    m.update(t, OPEN, P, 0.2)
+    for dt in range(300, 600, 33):  # appui de 300 ms : la fenêtre de 200 ms reste pincée
+        m.update(t + dt, PINCH, P, 0.2)
+    assert m.state == State.PINCHING
+    assert re_pinch_after(m, t + 600, P)
+    assert m.closing_speed <= 0  # pas de fermeture mesurée...
+    assert m.state == State.PINCHING  # ... mais exempté : la 2e tape est acceptée
+
+
+def test_no_second_tap_candidate_after_a_drag():
+    m = machine_rule_f()
+    t = activate(m)
+    m.update(t, OPEN, P, 0.2)
+    m.update(t + 300, PINCH, P, 0.2)
+    m.update(t + 333, PINCH, P, 0.2)  # Press
+    for dt in range(366, 600, 33):
+        m.update(t + dt, PINCH, (0.60, 0.50), 0.2)  # glisser
+    assert m.state == State.DRAGGING
+    assert not re_pinch_after(m, t + 600, (0.60, 0.50))
+    assert m.closing_speed <= 0
+    assert m.state == State.ACTIVE  # pas d'exemption : refusé
+    assert m.entry_block == "fermeture"

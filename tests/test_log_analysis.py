@@ -603,3 +603,26 @@ def test_closing_settings_from_the_config():
     old = closing_settings({"rule": "D"})  # log d'avant ces réglages
     assert not old.active
     assert old.closing_grace_ms == 0
+
+
+def test_contact_distance_to_the_previous_click_and_second_tap_column():
+    def r(t, state, events=(), cursor=(1000, 500), second_tap=None):
+        return Row(t, True, 0.1, 3, state, list(events), 9.0, cursor=cursor,
+                   wrist_speed=0.3, closing_speed=-0.2, second_tap=second_tap)
+
+    rows = [
+        r(0, "actif"),
+        r(33, "pincement"),  # clic sur place en (1000, 500)
+        r(66, "pincement", ["pressat"]),
+        r(99, "actif", ["releaseat"]),
+        r(132, "pincement", cursor=(1012, 505), second_tap=True),  # 2e tape à 13 px
+        r(165, "glisser", cursor=(1200, 505)),
+        r(198, "actif", ["release"]),
+        r(231, "pincement", cursor=(1205, 505), second_tap=False),  # après un glisser
+    ]
+    found = contact_closing_speeds(rows)
+    assert found[0].distance_px is None  # aucun clic avant
+    assert found[1].distance_px == pytest.approx(13.0)
+    assert found[1].second_tap is True
+    assert found[2].distance_px is None  # un glisser ne compte pas comme clic précédent
+    assert found[2].second_tap is False
