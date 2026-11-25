@@ -1459,3 +1459,24 @@ def test_no_second_tap_candidate_after_a_drag():
     assert m.closing_speed <= 0
     assert m.state == State.ACTIVE  # pas d'exemption : refusé
     assert m.entry_block == "fermeture"
+
+
+# --- max_contact_speed 1,8 (2026-11-25) ----------------------------------------------------------
+
+
+def test_contact_speed_refuses_the_whole_fast_crossing():
+    """Avec max_contact_speed 1,8, le pic de fermeture de 65 014 ms (poignet 5,54) n'entre
+    plus : seul le clic sur place de 64 296 ms reste."""
+    events = replay_crossing(max_contact_speed=1.8)
+    assert press_times(events) == [64343]
+    assert count(events, ReleaseAt) == 1
+
+
+@pytest.mark.parametrize("index", [0, 1, 2, 3])
+def test_contact_speed_keeps_the_real_double_clicks(index):
+    """Les 2es tapes réelles (poignet 0,08 à 0,68) restent loin du seuil de 1,8."""
+    events = replay(REAL_DOUBLE_CLICKS[index], rule="F", min_closing_speed=0.4,
+                    closing_grace_ms=300, closing_grace_max_speed=1.0, double_click_snap=0.08,
+                    release_fast_margin=0.05, release_rise=0.15, max_contact_speed=1.8)
+    assert count(events, PressAt) == 2
+    assert count(events, ReleaseAt) == 2

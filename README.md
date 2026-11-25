@@ -60,6 +60,8 @@ Les seuils se règlent dans [`config/gestures.yaml`](config/gestures.yaml).
   contre l'index (main au repos de profil) n'est pas pris pour un pincement. Main tournée
   vers la gauche, les autres doigts paraissent plus courts à l'image : ils restent acceptés
   (`fingers.folded_below` 0,65, qui ne sert plus qu'à refuser le poing).
+  **Pas de pincement pendant un déplacement rapide** de la main (`max_contact_speed`, 1,8
+  taille de main par seconde) : ralentir pour cliquer.
 - **Non reconnu** : le pincement index pointé vers la caméra, autres doigts repliés. C'est
   une décision de conception : ce geste ressemble trop à un poing pour être distingué de
   façon fiable. Une main au repos **de profil** (pouce contre l'index) peut encore être prise

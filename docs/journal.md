@@ -594,3 +594,29 @@ Incident pendant la modification : en ajoutant `closing_grace_max_speed`, la lig
 `closing_grace_ms: 300` du yaml a été effacée. Repéré par l'analyse (aucun contact exempté),
 avant tout commit. Un test vérifie maintenant que la configuration du projet garde
 l'exemption en règle F.
+
+## 2026-11-25 — max_contact_speed activé à 1,8
+
+Suite de l'entrée précédente : pendant une traversée rapide de l'écran, des contacts se
+ferment vraiment (fermeture 1,1 à 2,8, ou un pic du suivi bruité) et F les accepte : 23 921
+et 26 625 ms (log 17-54-53), et dans le rejeu 65 014 ms. La vitesse du poignet au contact les
+distingue. La condition existait depuis le 24/11, désactivée (marge jugée mince).
+
+Vitesse du poignet au contact, 289 contacts acceptés dans tous les logs : médiane 0,33,
+P95 1,46. **Refusés à 1,8 : 11** :
+- 19-12-46 : 72 140 (3,06), 72 421 (1,87), déjà identifiés comme involontaires le 24/11 ;
+- 17-05-40 : 93 188 (3,04, « clic » de 93 ms) ;
+- 17-54-53 : 22 155 (2,15), 22 468 (3,75), 22 750 (1,84), 23 921 (2,64), 26 625 (2,14),
+  62 125 (3,46), 64 827 (4,43), 99 375 (4,88, clic de 1 046 ms).
+
+Deux étaient peut-être volontaires (93 188 et 99 375 ms), mais ne visaient sans doute rien de
+précis. Le contact accepté le plus rapide est alors à 1,65 (18-43-22, clic de 328 ms). Les
+2es tapes de double-clic (poignet 0,08 à 0,68) restent loin du seuil.
+
+**Décision : `max_contact_speed: 1.8`.** Raison : un vrai clic refusé pendant un mouvement
+rapide coûte peu (on reclique) ; un faux glisser pendant une traversée peut déplacer ou
+déposer quelque chose.
+
+Tests : la traversée réelle de 64 827 ms ne produit plus que le clic sur place qui la
+précède (le pic de 65 014 ms, poignet 5,54, n'entre plus) ; les 4 doubles-clics réels du
+17-10-10 donnent toujours 2 clics chacun.

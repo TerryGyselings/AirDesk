@@ -84,11 +84,18 @@ pinch:
   # 0,40, aucun au-dessus de 0,45. 0 = désactivé.
   release_fast_margin: 0.05
   # Condition d'entrée : vitesse du poignet au contact < max_contact_speed (tailles de main
-  # par seconde), raison de refus « mouvement ». 0 = désactivé. Proposition 1,8 (logs du
-  # 2026-11-24) : 80 pincements suivis d'un clic ou d'un glisser, médiane 0,34, P95 1,65 ;
-  # 3 refusés (3,13 / 3,63 / 4,82, peut-être involontaires) ; les 2 pincements en trop
-  # (3,06 et 1,87, log 19-12-46 à 72 s) refusés. Marge mince : NON activée, à revoir.
-  max_contact_speed: 0.0
+  # par seconde), raison de refus « mouvement ». 0 = désactivé.
+  # ACTIVÉE le 2026-11-25 à 1,8. Pendant une traversée rapide de l'écran, des contacts se
+  # ferment vraiment (fermeture 1,1 à 2,8) et deviennent des glisser (log 17-54-53).
+  # 289 contacts acceptés dans tous les logs : médiane 0,33, P95 1,46. Refusés à 1,8 (11) :
+  #   19-12-46 : 72 140 (3,06), 72 421 (1,87) ; 17-05-40 : 93 188 (3,04, clic de 93 ms) ;
+  #   17-54-53 : 22 155 (2,15), 22 468 (3,75), 22 750 (1,84), 23 921 (2,64), 26 625 (2,14),
+  #   62 125 (3,46), 64 827 (4,43), 99 375 (4,88, clic de 1 046 ms).
+  # Deux d'entre eux étaient peut-être volontaires (93 188, 99 375), sans viser rien de
+  # précis. Un vrai clic refusé pendant un mouvement rapide coûte peu (on reclique) ; un faux
+  # glisser pendant une traversée peut déplacer ou déposer quelque chose.
+  # 2es tapes de double-clic : poignet 0,08 à 0,68, loin du seuil.
+  max_contact_speed: 1.8
   # Relâchement RELATIF (mode press, appui sur place seulement) : relâchement quand la mesure
   # remonte de plus de release_rise au-dessus de son minimum depuis le contact (et au-dessus
   # de enter), sans attendre exit. Sépare deux tapes rapides fusionnées (log 16-35-12 :
